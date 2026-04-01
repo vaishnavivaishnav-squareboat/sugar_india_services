@@ -2,9 +2,12 @@ from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Depends
 from fastapi.responses import Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_, update as sql_update, delete as sql_delete
 import os, logging, csv, io, json, uuid, random, httpx
+from contextlib import asynccontextmanager
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase, mapped_column
+from sqlalchemy import String, Float, Integer, Boolean, Text, select, func, desc, or_
 from pathlib import Path
 from pydantic import BaseModel
 from typing import List, Optional
@@ -16,24 +19,89 @@ from models import Lead, OutreachEmail
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-app = FastAPI()
-api_router = APIRouter(prefix="/api")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+engine = create_async_engine(DATABASE_URL, echo=False)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 METRO_CITIES = ["Mumbai", "Delhi", "Bangalore", "Hyderabad", "Chennai", "Kolkata", "Pune", "Ahmedabad"]
 
+# ─── ORM MODELS ──────────────────────────────────────────────────────────────
 
-# ─── STARTUP ──────────────────────────────────────────────────────────────────
+class Base(DeclarativeBase):
+    pass
 
-@app.on_event("startup")
-async def startup():
+
+class LeadModel(Base):
+    __tablename__ = "leads"
+
+    id = mapped_column(String, primary_key=True)
+    business_name = mapped_column(String, nullable=False, default="")
+    segment = mapped_column(String, default="Restaurant")
+    city = mapped_column(String, nullable=False, default="")
+    state = mapped_column(String, default="")
+    tier = mapped_column(Integer, default=1)
+    address = mapped_column(String, default="")
+    phone = mapped_column(String, default="")
+    email = mapped_column(String, default="")
+    website = mapped_column(String, default="")
+    rating = mapped_column(Float, default=0.0)
+    num_outlets = mapped_column(Integer, default=1)
+    decision_maker_name = mapped_column(String, default="")
+    decision_maker_role = mapped_column(String, default="")
+    decision_maker_linkedin = mapped_column(String, default="")
+    has_dessert_menu = mapped_column(Boolean, default=False)
+    hotel_category = mapped_column(String, default="")
+    is_chain = mapped_column(Boolean, default=False)
+    source = mapped_column(String, default="manual")
+    monthly_volume_estimate = mapped_column(String, default="")
+    ai_score = mapped_column(Integer, default=0)
+    ai_reasoning = mapped_column(Text, default="")
+    priority = mapped_column(String, default="Low")
+    status = mapped_column(String, default="new")
+    created_at = mapped_column(String, default="")
+    updated_at = mapped_column(String, default="")
+
+
+class OutreachEmailModel(Base):
+    __tablename__ = "outreach_emails"
+
+    id = mapped_column(String, primary_key=True)
+    lead_id = mapped_column(String, nullable=False, default="")
+    lead_name = mapped_column(String, default="")
+    lead_city = mapped_column(String, default="")
+    lead_segment = mapped_column(String, default="")
+    subject = mapped_column(String, default="")
+    body = mapped_column(Text, default="")
+    status = mapped_column(String, default="draft")
+    generated_at = mapped_column(String, default="")
+    sent_at = mapped_column(String, nullable=True)
+
+
+def model_to_dict(obj) -> dict:
+    return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
+
+
+# ─── LIFESPAN ────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("PostgreSQL tables created/verified")
+    yield
+    await engine.dispose()
 
 
-# ─── SCORING ENGINE ───────────────────────────────────────────────────────────
+# ─── APP ─────────────────────────────────────────────────────────────────────
+
+app = FastAPI(lifespan=lifespan)
+api_router = APIRouter(prefix="/api")
+
+
+# ─── SCORING ENGINE ──────────────────────────────────────────────────────────
 
 def calculate_lead_score(data: dict):
     score, reasons = 0, []
@@ -362,32 +430,57 @@ async def root():
 
 
 @api_router.get("/dashboard/stats")
-async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
-    total_leads = await db.scalar(select(func.count()).select_from(Lead))
-    high_priority = await db.scalar(select(func.count()).select_from(Lead).where(Lead.priority == "High"))
-    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-    new_this_week = await db.scalar(select(func.count()).select_from(Lead).where(Lead.created_at >= week_ago))
-    converted = await db.scalar(select(func.count()).select_from(Lead).where(Lead.status == "converted"))
-    conversion_rate = round((converted / total_leads * 100), 1) if total_leads else 0
+async def get_dashboard_stats():
+    async with AsyncSessionLocal() as session:
+        total_leads = (await session.execute(
+            select(func.count()).select_from(LeadModel)
+        )).scalar() or 0
 
-    city_rows = (await db.execute(
-        select(Lead.city, func.count(Lead.id).label("count"))
-        .group_by(Lead.city).order_by(func.count(Lead.id).desc()).limit(8)
-    )).all()
-    seg_rows = (await db.execute(
-        select(Lead.segment, func.count(Lead.id).label("count"))
-        .group_by(Lead.segment).order_by(func.count(Lead.id).desc())
-    )).all()
-    status_rows = (await db.execute(
-        select(Lead.status, func.count(Lead.id).label("count")).group_by(Lead.status)
-    )).all()
+        high_priority = (await session.execute(
+            select(func.count()).select_from(LeadModel).where(LeadModel.priority == "High")
+        )).scalar() or 0
 
-    recent_leads = (await db.execute(
-        select(Lead).order_by(Lead.created_at.desc()).limit(6)
-    )).scalars().all()
-    top_leads = (await db.execute(
-        select(Lead).order_by(Lead.ai_score.desc()).limit(5)
-    )).scalars().all()
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        new_this_week = (await session.execute(
+            select(func.count()).select_from(LeadModel).where(LeadModel.created_at >= week_ago)
+        )).scalar() or 0
+
+        converted = (await session.execute(
+            select(func.count()).select_from(LeadModel).where(LeadModel.status == "converted")
+        )).scalar() or 0
+
+        conversion_rate = round((converted / total_leads * 100), 1) if total_leads > 0 else 0
+
+        city_result = await session.execute(
+            select(LeadModel.city, func.count(LeadModel.id).label('count'))
+            .group_by(LeadModel.city)
+            .order_by(desc(func.count(LeadModel.id)))
+            .limit(8)
+        )
+        city_dist = [{"city": row.city or "Unknown", "count": row.count} for row in city_result]
+
+        seg_result = await session.execute(
+            select(LeadModel.segment, func.count(LeadModel.id).label('count'))
+            .group_by(LeadModel.segment)
+            .order_by(desc(func.count(LeadModel.id)))
+        )
+        seg_dist = [{"segment": row.segment or "Unknown", "count": row.count} for row in seg_result]
+
+        status_result = await session.execute(
+            select(LeadModel.status, func.count(LeadModel.id).label('count'))
+            .group_by(LeadModel.status)
+        )
+        status_dist = [{"status": row.status or "Unknown", "count": row.count} for row in status_result]
+
+        recent_result = await session.execute(
+            select(LeadModel).order_by(desc(LeadModel.created_at)).limit(6)
+        )
+        recent = [model_to_dict(r) for r in recent_result.scalars()]
+
+        top_result = await session.execute(
+            select(LeadModel).order_by(desc(LeadModel.ai_score)).limit(5)
+        )
+        top_leads = [model_to_dict(r) for r in top_result.scalars()]
 
     return {
         "total_leads": total_leads or 0,
@@ -395,11 +488,11 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
         "new_this_week": new_this_week or 0,
         "converted": converted or 0,
         "conversion_rate": conversion_rate,
-        "city_distribution": [{"city": r.city or "Unknown", "count": r.count} for r in city_rows],
-        "segment_distribution": [{"segment": r.segment or "Unknown", "count": r.count} for r in seg_rows],
-        "status_distribution": [{"status": r.status or "Unknown", "count": r.count} for r in status_rows],
-        "recent_leads": [l.to_dict() for l in recent_leads],
-        "top_leads": [l.to_dict() for l in top_leads],
+        "city_distribution": city_dist,
+        "segment_distribution": seg_dist,
+        "status_distribution": status_dist,
+        "recent_leads": recent,
+        "top_leads": top_leads
     }
 
 
@@ -411,26 +504,41 @@ async def get_leads(
     limit: int = 100, skip: int = 0,
     db: AsyncSession = Depends(get_db)
 ):
-    conditions = []
-    if city:      conditions.append(Lead.city.ilike(f"%{city}%"))
-    if segment:   conditions.append(Lead.segment == segment)
-    if priority:  conditions.append(Lead.priority == priority)
-    if status:    conditions.append(Lead.status == status)
-    if min_score is not None: conditions.append(Lead.ai_score >= min_score)
-    if search:
-        conditions.append(or_(
-            Lead.business_name.ilike(f"%{search}%"),
-            Lead.city.ilike(f"%{search}%"),
-            Lead.decision_maker_name.ilike(f"%{search}%")
-        ))
+    async with AsyncSessionLocal() as session:
+        stmt = select(LeadModel)
+        count_stmt = select(func.count()).select_from(LeadModel)
 
-    base_q = select(Lead)
-    if conditions:
-        base_q = base_q.where(and_(*conditions))
+        if city:
+            stmt = stmt.where(LeadModel.city.ilike(f"%{city}%"))
+            count_stmt = count_stmt.where(LeadModel.city.ilike(f"%{city}%"))
+        if segment:
+            stmt = stmt.where(LeadModel.segment == segment)
+            count_stmt = count_stmt.where(LeadModel.segment == segment)
+        if priority:
+            stmt = stmt.where(LeadModel.priority == priority)
+            count_stmt = count_stmt.where(LeadModel.priority == priority)
+        if status:
+            stmt = stmt.where(LeadModel.status == status)
+            count_stmt = count_stmt.where(LeadModel.status == status)
+        if min_score is not None:
+            stmt = stmt.where(LeadModel.ai_score >= min_score)
+            count_stmt = count_stmt.where(LeadModel.ai_score >= min_score)
+        if search:
+            search_filter = or_(
+                LeadModel.business_name.ilike(f"%{search}%"),
+                LeadModel.city.ilike(f"%{search}%"),
+                LeadModel.decision_maker_name.ilike(f"%{search}%")
+            )
+            stmt = stmt.where(search_filter)
+            count_stmt = count_stmt.where(search_filter)
 
-    leads = (await db.execute(base_q.order_by(Lead.ai_score.desc()).offset(skip).limit(limit))).scalars().all()
-    total = await db.scalar(select(func.count()).select_from(Lead).where(and_(*conditions)) if conditions else select(func.count()).select_from(Lead))
-    return {"leads": [l.to_dict() for l in leads], "total": total or 0}
+        total = (await session.execute(count_stmt)).scalar() or 0
+        result = await session.execute(
+            stmt.order_by(desc(LeadModel.ai_score)).offset(skip).limit(limit)
+        )
+        leads = [model_to_dict(r) for r in result.scalars()]
+
+    return {"leads": leads, "total": total}
 
 
 @api_router.get("/leads/csv-template")
@@ -455,37 +563,42 @@ async def upload_csv(file: UploadFile = File(...), db: AsyncSession = Depends(ge
         text = content.decode('latin-1')
 
     reader = csv.DictReader(io.StringIO(text))
-    created, errors = [], []
-    for i, row in enumerate(reader):
-        try:
-            data = {
-                "business_name": str(row.get('business_name', '')).strip(),
-                "segment": str(row.get('segment', 'Restaurant')).strip() or 'Restaurant',
-                "city": str(row.get('city', '')).strip(),
-                "state": str(row.get('state', '')).strip(),
-                "tier": int(str(row.get('tier', '1')).strip() or '1'),
-                "address": str(row.get('address', '')).strip(),
-                "phone": str(row.get('phone', '')).strip(),
-                "email": str(row.get('email', '')).strip(),
-                "website": str(row.get('website', '')).strip(),
-                "rating": float(str(row.get('rating', '0')).strip() or '0'),
-                "num_outlets": int(str(row.get('num_outlets', '1')).strip() or '1'),
-                "decision_maker_name": str(row.get('decision_maker_name', '')).strip(),
-                "decision_maker_role": str(row.get('decision_maker_role', '')).strip(),
-                "decision_maker_linkedin": str(row.get('decision_maker_linkedin', '')).strip(),
-                "has_dessert_menu": str(row.get('has_dessert_menu', 'false')).lower() in ('true', '1', 'yes'),
-                "hotel_category": str(row.get('hotel_category', '')).strip(),
-                "is_chain": str(row.get('is_chain', 'false')).lower() in ('true', '1', 'yes'),
-                "source": "csv_upload",
-                "monthly_volume_estimate": str(row.get('monthly_volume_estimate', '')).strip()
-            }
-            if not data['business_name'] or not data['city']:
-                errors.append(f"Row {i+2}: Missing business_name or city"); continue
-            lead_obj = make_lead_obj(data)
-            db.add(lead_obj)
-            created.append(lead_obj.to_dict())
-        except Exception as e:
-            errors.append(f"Row {i+2}: {str(e)}")
+    created = []
+    errors = []
+
+    async with AsyncSessionLocal() as session:
+        for i, row in enumerate(reader):
+            try:
+                lead_data = {
+                    "business_name": str(row.get('business_name', '')).strip(),
+                    "segment": str(row.get('segment', 'Restaurant')).strip() or 'Restaurant',
+                    "city": str(row.get('city', '')).strip(),
+                    "state": str(row.get('state', '')).strip(),
+                    "tier": int(str(row.get('tier', '1')).strip() or '1'),
+                    "address": str(row.get('address', '')).strip(),
+                    "phone": str(row.get('phone', '')).strip(),
+                    "email": str(row.get('email', '')).strip(),
+                    "website": str(row.get('website', '')).strip(),
+                    "rating": float(str(row.get('rating', '0')).strip() or '0'),
+                    "num_outlets": int(str(row.get('num_outlets', '1')).strip() or '1'),
+                    "decision_maker_name": str(row.get('decision_maker_name', '')).strip(),
+                    "decision_maker_role": str(row.get('decision_maker_role', '')).strip(),
+                    "decision_maker_linkedin": str(row.get('decision_maker_linkedin', '')).strip(),
+                    "has_dessert_menu": str(row.get('has_dessert_menu', 'false')).lower().strip() in ('true', '1', 'yes'),
+                    "hotel_category": str(row.get('hotel_category', '')).strip(),
+                    "is_chain": str(row.get('is_chain', 'false')).lower().strip() in ('true', '1', 'yes'),
+                    "source": "csv_upload",
+                    "monthly_volume_estimate": str(row.get('monthly_volume_estimate', '')).strip()
+                }
+                if not lead_data['business_name'] or not lead_data['city']:
+                    errors.append(f"Row {i + 2}: Missing business_name or city")
+                    continue
+                doc = make_lead_doc(lead_data)
+                session.add(LeadModel(**doc))
+                created.append(doc)
+            except Exception as e:
+                errors.append(f"Row {i + 2}: {str(e)}")
+        await session.commit()
 
     await db.commit()
     return {"created": len(created), "errors": errors}
@@ -520,60 +633,71 @@ async def discover_leads(req: DiscoverRequest):
 @api_router.post("/leads/bulk-create")
 async def bulk_create_leads(req: BulkCreateRequest, db: AsyncSession = Depends(get_db)):
     created = []
-    for ld in req.leads:
-        for k in ['ai_score', 'ai_reasoning', 'priority']:
-            ld.pop(k, None)
-        obj = make_lead_obj(ld)
-        db.add(obj)
-        created.append(obj.to_dict())
-    await db.commit()
+    async with AsyncSessionLocal() as session:
+        for lead_dict in req.leads:
+            lead_dict.pop('ai_score', None)
+            lead_dict.pop('ai_reasoning', None)
+            lead_dict.pop('priority', None)
+            doc = make_lead_doc(lead_dict)
+            session.add(LeadModel(**doc))
+            created.append(doc)
+        await session.commit()
     return {"created": len(created), "leads": created}
 
 
 @api_router.post("/leads")
-async def create_lead(lead: LeadCreate, db: AsyncSession = Depends(get_db)):
-    obj = make_lead_obj(lead.model_dump())
-    db.add(obj)
-    await db.commit()
-    await db.refresh(obj)
-    return obj.to_dict()
+async def create_lead(lead: LeadCreate):
+    doc = make_lead_doc(lead.model_dump())
+    async with AsyncSessionLocal() as session:
+        session.add(LeadModel(**doc))
+        await session.commit()
+    return doc
 
 
 @api_router.get("/leads/{lead_id}")
-async def get_lead(lead_id: str, db: AsyncSession = Depends(get_db)):
-    lead = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
-    if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    return lead.to_dict()
+async def get_lead(lead_id: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(LeadModel).where(LeadModel.id == lead_id))
+        lead = result.scalar_one_or_none()
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        return model_to_dict(lead)
 
 
 @api_router.put("/leads/{lead_id}/status")
-async def update_lead_status(lead_id: str, body: LeadStatusUpdate, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        sql_update(Lead).where(Lead.id == lead_id)
-        .values(status=body.status, updated_at=datetime.now(timezone.utc))
-    )
-    if result.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    await db.commit()
-    lead = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
-    return lead.to_dict()
+async def update_lead_status(lead_id: str, body: LeadStatusUpdate):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(LeadModel).where(LeadModel.id == lead_id))
+        lead = result.scalar_one_or_none()
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        lead.status = body.status
+        lead.updated_at = datetime.now(timezone.utc).isoformat()
+        await session.commit()
+        await session.refresh(lead)
+        return model_to_dict(lead)
 
 
 @api_router.delete("/leads/{lead_id}")
-async def delete_lead(lead_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(sql_delete(Lead).where(Lead.id == lead_id))
-    if result.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    await db.commit()
+async def delete_lead(lead_id: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(LeadModel).where(LeadModel.id == lead_id))
+        lead = result.scalar_one_or_none()
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        await session.delete(lead)
+        await session.commit()
     return {"message": "Lead deleted"}
 
 
 @api_router.post("/leads/{lead_id}/qualify-ai")
-async def qualify_lead_ai(lead_id: str, db: AsyncSession = Depends(get_db)):
-    lead = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
-    if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
+async def qualify_lead_ai(lead_id: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(LeadModel).where(LeadModel.id == lead_id))
+        lead_obj = result.scalar_one_or_none()
+        if not lead_obj:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        lead = model_to_dict(lead_obj)
 
     api_key = os.environ.get('EMERGENT_LLM_KEY')
     if not api_key:
@@ -598,29 +722,32 @@ Respond ONLY with valid JSON:
         if '```json' in json_str: json_str = json_str.split('```json')[1].split('```')[0]
         elif '```' in json_str: json_str = json_str.split('```')[1].split('```')[0]
         ai_data = json.loads(json_str.strip())
-
-        await db.execute(
-            sql_update(Lead).where(Lead.id == lead_id).values(
-                ai_score=int(ai_data.get('ai_score', lead.ai_score)),
-                ai_reasoning=ai_data.get('qualification_summary', lead.ai_reasoning),
-                priority=ai_data.get('priority', lead.priority),
-                monthly_volume_estimate=ai_data.get('monthly_volume_kg', ''),
-                updated_at=datetime.now(timezone.utc)
-            )
-        )
-        await db.commit()
-        updated = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one()
-        return {"lead": updated.to_dict(), "ai_analysis": ai_data}
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(LeadModel).where(LeadModel.id == lead_id))
+            lead_obj = result.scalar_one_or_none()
+            if lead_obj:
+                lead_obj.ai_score = int(ai_data.get('ai_score', lead['ai_score']))
+                lead_obj.ai_reasoning = ai_data.get('qualification_summary', lead['ai_reasoning'])
+                lead_obj.priority = ai_data.get('priority', lead['priority'])
+                lead_obj.monthly_volume_estimate = ai_data.get('monthly_volume_kg', '')
+                lead_obj.updated_at = datetime.now(timezone.utc).isoformat()
+                await session.commit()
+                await session.refresh(lead_obj)
+                updated = model_to_dict(lead_obj)
+        return {"lead": updated, "ai_analysis": ai_data}
     except Exception as e:
         logger.error(f"AI qualify error: {e}")
         raise HTTPException(status_code=500, detail=f"AI qualification failed: {str(e)}")
 
 
 @api_router.post("/leads/{lead_id}/generate-email")
-async def generate_email(lead_id: str, db: AsyncSession = Depends(get_db)):
-    lead = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
-    if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
+async def generate_email(lead_id: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(LeadModel).where(LeadModel.id == lead_id))
+        lead_obj = result.scalar_one_or_none()
+        if not lead_obj:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        lead = model_to_dict(lead_obj)
 
     api_key = os.environ.get('EMERGENT_LLM_KEY')
     if not api_key:
@@ -661,54 +788,73 @@ Dear {first_name},
                 body_lines.append(line)
         body = '\n'.join(body_lines).strip()
 
-        email_obj = OutreachEmail(
-            id=str(uuid.uuid4()), lead_id=lead_id,
-            lead_name=lead.business_name, lead_city=lead.city, lead_segment=lead.segment,
-            subject=subject, body=body, status="draft"
-        )
-        db.add(email_obj)
-        await db.commit()
-        await db.refresh(email_obj)
-        return email_obj.to_dict()
+        now = datetime.now(timezone.utc)
+        doc = {
+            "id": str(uuid.uuid4()),
+            "lead_id": lead_id,
+            "lead_name": lead['business_name'],
+            "lead_city": lead['city'],
+            "lead_segment": lead['segment'],
+            "subject": subject,
+            "body": body,
+            "status": "draft",
+            "generated_at": now.isoformat(),
+            "sent_at": None
+        }
+        async with AsyncSessionLocal() as session:
+            session.add(OutreachEmailModel(**doc))
+            await session.commit()
+        doc.pop('sent_at', None)
+        return doc
     except Exception as e:
         logger.error(f"Email gen error: {e}")
         raise HTTPException(status_code=500, detail=f"Email generation failed: {str(e)}")
 
 
 @api_router.get("/outreach/emails")
-async def get_all_emails(limit: int = 50, db: AsyncSession = Depends(get_db)):
-    emails = (await db.execute(
-        select(OutreachEmail).order_by(OutreachEmail.generated_at.desc()).limit(limit)
-    )).scalars().all()
-    return [e.to_dict() for e in emails]
+async def get_all_emails(limit: int = 50):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(OutreachEmailModel).order_by(desc(OutreachEmailModel.generated_at)).limit(limit)
+        )
+        return [model_to_dict(e) for e in result.scalars()]
 
 
 @api_router.get("/outreach/{lead_id}/emails")
-async def get_lead_emails(lead_id: str, db: AsyncSession = Depends(get_db)):
-    emails = (await db.execute(
-        select(OutreachEmail).where(OutreachEmail.lead_id == lead_id)
-        .order_by(OutreachEmail.generated_at.desc()).limit(20)
-    )).scalars().all()
-    return [e.to_dict() for e in emails]
+async def get_lead_emails(lead_id: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(OutreachEmailModel)
+            .where(OutreachEmailModel.lead_id == lead_id)
+            .order_by(desc(OutreachEmailModel.generated_at))
+            .limit(20)
+        )
+        return [model_to_dict(e) for e in result.scalars()]
 
 
 @api_router.put("/outreach/{email_id}/mark-sent")
-async def mark_email_sent(email_id: str, db: AsyncSession = Depends(get_db)):
-    await db.execute(
-        sql_update(OutreachEmail).where(OutreachEmail.id == email_id)
-        .values(status="sent", sent_at=datetime.now(timezone.utc))
-    )
-    await db.commit()
-    email = (await db.execute(select(OutreachEmail).where(OutreachEmail.id == email_id))).scalar_one_or_none()
-    if not email:
-        raise HTTPException(status_code=404, detail="Email not found")
-    return email.to_dict()
+async def mark_email_sent(email_id: str):
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(OutreachEmailModel).where(OutreachEmailModel.id == email_id)
+        )
+        email = result.scalar_one_or_none()
+        if not email:
+            raise HTTPException(status_code=404, detail="Email not found")
+        email.status = "sent"
+        email.sent_at = datetime.now(timezone.utc).isoformat()
+        await session.commit()
+        await session.refresh(email)
+        return model_to_dict(email)
 
 
 @api_router.post("/seed-mock-data")
-async def seed_mock_data(db: AsyncSession = Depends(get_db)):
-    count = await db.scalar(select(func.count()).select_from(Lead))
-    if count and count > 0:
+async def seed_mock_data():
+    async with AsyncSessionLocal() as session:
+        count = (await session.execute(
+            select(func.count()).select_from(LeadModel)
+        )).scalar() or 0
+    if count > 0:
         return {"message": f"Already has {count} leads", "count": count}
 
     mock_leads = [
@@ -744,23 +890,29 @@ async def seed_mock_data(db: AsyncSession = Depends(get_db)):
         {"business_name": "Pal Dhaba Chandigarh", "segment": "Restaurant", "city": "Chandigarh", "state": "Punjab", "tier": 2, "address": "Sector 28, Chandigarh", "phone": "+91-172-2706-7890", "email": "orders@paldhaba.com", "website": "www.paldhaba.com", "rating": 4.4, "num_outlets": 3, "decision_maker_name": "Kulwant Singh", "decision_maker_role": "Owner", "decision_maker_linkedin": "", "has_dessert_menu": True, "hotel_category": "", "is_chain": False, "source": "mock_data", "monthly_volume_estimate": "150-250 kg"},
     ]
 
-    statuses = ["new", "new", "new", "new", "contacted", "contacted", "qualified", "converted", "lost"]
-    created = 0
-    for i, data in enumerate(mock_leads):
-        score, priority, reasoning = calculate_lead_score(data)
-        days_ago = random.randint(0, 45)
-        ts = datetime.now(timezone.utc) - timedelta(days=days_ago)
-        obj = Lead(
-            id=str(uuid.uuid4()), **data,
-            ai_score=score, ai_reasoning=reasoning, priority=priority,
-            status=statuses[i % len(statuses)],
-            created_at=ts, updated_at=ts
-        )
-        db.add(obj)
-        created += 1
+    async with AsyncSessionLocal() as session:
+        statuses = ["new", "new", "new", "new", "contacted", "contacted", "qualified", "converted", "lost"]
+        created = 0
+        for i, lead_data in enumerate(mock_leads):
+            score, priority, reasoning = calculate_lead_score(lead_data)
+            status = statuses[i % len(statuses)]
+            days_ago = random.randint(0, 45)
+            ts = datetime.now(timezone.utc) - timedelta(days=days_ago)
+            doc = {
+                "id": str(uuid.uuid4()),
+                **lead_data,
+                "ai_score": score,
+                "ai_reasoning": reasoning,
+                "priority": priority,
+                "status": status,
+                "created_at": ts.isoformat(),
+                "updated_at": ts.isoformat()
+            }
+            session.add(LeadModel(**doc))
+            created += 1
 
-    await db.commit()
-    return {"message": f"Seeded {created} HORECA leads into PostgreSQL", "count": created}
+        await session.commit()
+        return {"message": f"Seeded {created} HORECA leads", "count": created}
 
 
 app.include_router(api_router)
@@ -771,3 +923,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+

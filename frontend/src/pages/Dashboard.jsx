@@ -7,7 +7,7 @@ import {
 } from "recharts";
 import { TrendingUp, Users, Star, ArrowRight, MapPin, Trophy, Zap } from "lucide-react";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = `${import.meta.env.VITE_BACKEND_URL}/api`;
 
 const SEGMENT_COLORS = {
   Hotel: "#143628", Restaurant: "#3D6B56", Cafe: "#8FA39A",
