@@ -1,0 +1,83 @@
+{
+  "theme": "light",
+  "archetype": "Archetype 1: Organic & Earthy",
+  "rationale": "Dhampur Green is an FMCG/Agri brand (sugar/sweeteners). We need a high-density B2B sales dashboard that feels premium and trustworthy. We avoid the clinical 'SaaS Blue' and instead use a 'Control Room' dense layout styled with deep forest greens, warm jaggery/terracotta accents, and off-white/bone backgrounds. This creates an authoritative yet grounded emotional tone.",
+  "typography": {
+    "fonts": {
+      "headings": "Cabinet Grotesk",
+      "body": "Figtree",
+      "mono": "JetBrains Mono"
+    },
+    "rules": [
+      "Headings use tracking-tight to tracking-tighter.",
+      "Overlines and labels must be uppercase, text-xs, tracking-[0.2em].",
+      "No generic Inter for headings. Use Cabinet Grotesk for a slightly architectural/structured corporate feel.",
+      "Maintain a 2-step maximum jump in Tailwind typography scale between H1 and H2 (e.g., text-3xl to text-xl)."
+    ]
+  },
+  "colors": {
+    "background": "#F8F9F6",
+    "foreground": "#16221E",
+    "primary": "#143628",
+    "primary_foreground": "#FFFFFF",
+    "secondary": "#EAECE6",
+    "secondary_foreground": "#16221E",
+    "accent_jaggery": "#B85C38",
+    "accent_jaggery_foreground": "#FFFFFF",
+    "muted": "#EDF0EA",
+    "muted_foreground": "#5C736A",
+    "border": "#DCE1D9",
+    "sidebar_bg": "#143628",
+    "sidebar_foreground": "#FFFFFF"
+  },
+  "layout_and_spacing": {
+    "strategy": "The 'Control Room' Grid",
+    "rules": [
+      "Use dense, compact spacing for tables and lists (p-2, p-3).",
+      "Dashboard widgets should use col-span-1 for summaries, col-span-2 or 3 for charts.",
+      "Eliminate large gaps in data-heavy areas: use gap-4 or gap-6 maximum.",
+      "Instead of floaty shadow cards, use flat surfaces with 1px border-border and rounded-md or rounded-none for a crisp, technical look.",
+      "Sidebar should be fixed width (e.g., 260px) with dark green background (#143628) for high contrast framing against the light content area."
+    ]
+  },
+  "components": {
+    "cards": "Flat background, 1px solid border (#DCE1D9), no shadows by default. Slight lift (-translate-y-[1px]) and shadow-sm on hover.",
+    "buttons": "Primary buttons: bg-[#143628] text-white. Use earthy terracotta (#B85C38) ONLY for critical/high-priority CTAs (like 'Generate AI Email' or 'High Priority Lead').",
+    "badges": "Use tinted backgrounds: Qualified = bg-[#143628]/10 text-[#143628], High Priority = bg-[#B85C38]/10 text-[#B85C38].",
+    "tables": "Shadcn Table. Remove outer borders if within a card. Ensure text-sm for density.",
+    "charts": "Recharts or Shadcn Charts. Use deep green (#143628), sage (#8FA39A), and jaggery (#B85C38) for data series. No default vibrant blue/purple."
+  },
+  "media": {
+    "images": [
+      {
+        "url": "https://images.unsplash.com/photo-1774387579627-8583d0715415?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzB8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMGdyZWVuJTIwZWFydGh5JTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3NzUwMjY1NDh8MA&ixlib=rb-4.1.0&q=85",
+        "category": "auth_background",
+        "description": "Abstract green and gold textured background for Login/Auth screen."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1751956066306-c5684cbcf385?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MDV8MHwxfHNlYXJjaHwzfHxtb2Rlcm4lMjBjYWZlJTIwaW50ZXJpb3J8ZW58MHx8fHwxNzc1MDI2NTQ3fDA&ixlib=rb-4.1.0&q=85",
+        "category": "empty_state_illustration",
+        "description": "Warm modern cafe interior to be used as a stylized empty state or header image for HORECA leads."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1762522926157-bcc04bf0b10a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1Mjh8MHwxfHNlYXJjaHwyfHxwcm9mZXNzaW9uYWwlMjBjb3Jwb3JhdGUlMjBoZWFkc2hvdCUyMHBvcnRyYWl0fGVufDB8fHx8MTc3NDk3OTI2OXww&ixlib=rb-4.1.0&q=85",
+        "category": "user_avatar",
+        "description": "Professional corporate headshot for the logged-in sales rep/manager profile."
+      }
+    ]
+  },
+  "icons": {
+    "library": "lucide-react",
+    "rules": "Use stroke-width 1.5 for a sophisticated, clean look. Do not use overly thick icons."
+  },
+  "testing": {
+    "attributes": "ALL interactive elements (buttons, inputs, tr rows, tabs, select items) MUST have a data-testid attribute formatted as kebab-case role-based (e.g., data-testid='upload-csv-button')."
+  },
+  "pages_and_features": {
+    "dashboard_overview": "Use 'Control Room' grid. KPI cards at the top (col-span-1 each). Main area split into 'Lead Pipeline Map' (col-span-2) and 'Recent Activity/High Priority Feed' (col-span-1).",
+    "lead_discovery": "Clean search interface. When showing the API fetch or CSV upload, use a dashed 1px border area (bg-muted) with the cafe abstract image faintly in the background or alongside.",
+    "lead_database": "Dense Shadcn Table. Include a specific column for 'AI Score' represented by a small colored progress bar (Green for >80, Terracotta for <50).",
+    "lead_detail": "Bento grid layout. Left column (narrow): Contact Info, Labels. Right column (wide): AI Qualification Reasoning, Outreach Center, Email Drafts.",
+    "outreach_center": "Display AI-generated email inside a 'Terminal/Text-editor' styled block: font-mono text-sm bg-[#F4F5F0] border border-border p-4 rounded-md. Button to 'Regenerate' or 'Send' directly below."
+  }
+}
