@@ -1,34 +1,83 @@
-.App-logo {
-    height: 40vmin;
-    pointer-events: none;
+.font-heading {
+  font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
+.font-body {
+  font-family: 'Figtree', 'Inter', sans-serif;
 }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+.font-mono-custom {
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
 }
 
-.App-link {
-    color: #61dafb;
+/* Score bar animation */
+.score-bar-fill {
+  transition: width 0.6s ease-out;
 }
 
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
+/* Sidebar nav item hover */
+.sidebar-nav-item {
+  transition: background-color 0.15s ease, padding-left 0.15s ease;
 }
+.sidebar-nav-item:hover {
+  background-color: rgba(255,255,255,0.1);
+}
+.sidebar-nav-item.active {
+  background-color: rgba(255,255,255,0.15);
+  border-left: 3px solid #B85C38;
+}
+
+/* Card hover effect */
+.lead-card {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.lead-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(20, 54, 40, 0.1);
+}
+
+/* Table row hover */
+.lead-row {
+  transition: background-color 0.1s ease;
+  cursor: pointer;
+}
+.lead-row:hover {
+  background-color: #f0f3ef;
+}
+
+/* Fade-in animation for page content */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in {
+  animation: fadeInUp 0.35s ease-out forwards;
+}
+.animate-fade-in-delay-1 { animation-delay: 0.05s; opacity: 0; animation-fill-mode: forwards; }
+.animate-fade-in-delay-2 { animation-delay: 0.1s; opacity: 0; animation-fill-mode: forwards; }
+.animate-fade-in-delay-3 { animation-delay: 0.15s; opacity: 0; animation-fill-mode: forwards; }
+.animate-fade-in-delay-4 { animation-delay: 0.2s; opacity: 0; animation-fill-mode: forwards; }
+
+/* Email editor block */
+.email-editor {
+  font-family: 'JetBrains Mono', monospace;
+  background-color: #F4F5F0;
+  border: 1px solid #DCE1D9;
+  border-radius: 6px;
+  padding: 16px;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  color: #16221E;
+}
+
+/* Priority badge colors */
+.badge-high { background-color: rgba(184, 92, 56, 0.1); color: #B85C38; }
+.badge-medium { background-color: rgba(20, 54, 40, 0.08); color: #143628; }
+.badge-low { background-color: rgba(92, 115, 106, 0.1); color: #5C736A; }
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #F8F9F6; }
+::-webkit-scrollbar-thumb { background: #DCE1D9; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #5C736A; }
