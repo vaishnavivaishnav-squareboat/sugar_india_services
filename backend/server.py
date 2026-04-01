@@ -1,82 +1,69 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Depends
 from fastapi.responses import Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
-import csv
-import io
-import json
-import uuid
-import random
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, or_, and_, update as sql_update, delete as sql_delete
+import os, logging, csv, io, json, uuid, random, httpx
 from pathlib import Path
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from database import engine, get_db, Base
+from models import Lead, OutreachEmail
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
-
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+METRO_CITIES = ["Mumbai", "Delhi", "Bangalore", "Hyderabad", "Chennai", "Kolkata", "Pune", "Ahmedabad"]
 
-# ─── SCORING ENGINE ──────────────────────────────────────────────────────────
+
+# ─── STARTUP ──────────────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("PostgreSQL tables created/verified")
+
+
+# ─── SCORING ENGINE ───────────────────────────────────────────────────────────
 
 def calculate_lead_score(data: dict):
-    score = 0
-    reasons = []
-
+    score, reasons = 0, []
     hotel_cat = data.get('hotel_category', '')
-    if hotel_cat == '5-star':
-        score += 30; reasons.append('5-star hotel (+30)')
-    elif hotel_cat == '4-star':
-        score += 20; reasons.append('4-star hotel (+20)')
-    elif hotel_cat == '3-star':
-        score += 10; reasons.append('3-star hotel (+10)')
+    if hotel_cat == '5-star':   score += 30; reasons.append('5-star hotel (+30)')
+    elif hotel_cat == '4-star': score += 20; reasons.append('4-star hotel (+20)')
+    elif hotel_cat == '3-star': score += 10; reasons.append('3-star hotel (+10)')
 
     segment = data.get('segment', '')
     seg_pts = {'Bakery': 25, 'Mithai': 22, 'IceCream': 20, 'Cafe': 20,
                'CloudKitchen': 18, 'Catering': 18, 'Restaurant': 15, 'Hotel': 12}
     if segment in seg_pts:
-        pts = seg_pts[segment]
-        score += pts; reasons.append(f'{segment} segment (+{pts})')
+        pts = seg_pts[segment]; score += pts; reasons.append(f'{segment} segment (+{pts})')
 
-    if data.get('is_chain'):
-        score += 15; reasons.append('Chain business (+15)')
+    if data.get('is_chain'): score += 15; reasons.append('Chain business (+15)')
 
     outlets = int(data.get('num_outlets', 1) or 1)
-    if outlets >= 10:
-        score += 15; reasons.append(f'{outlets} outlets (+15)')
-    elif outlets >= 3:
-        score += 10; reasons.append(f'{outlets} outlets (+10)')
+    if outlets >= 10:   score += 15; reasons.append(f'{outlets} outlets (+15)')
+    elif outlets >= 3:  score += 10; reasons.append(f'{outlets} outlets (+10)')
 
     rating = float(data.get('rating', 0) or 0)
-    if rating >= 4.5:
-        score += 10; reasons.append('Rating 4.5+ (+10)')
-    elif rating >= 4.0:
-        score += 7; reasons.append('Rating 4.0+ (+7)')
+    if rating >= 4.5:   score += 10; reasons.append('Rating 4.5+ (+10)')
+    elif rating >= 4.0: score += 7;  reasons.append('Rating 4.0+ (+7)')
 
     tier = int(data.get('tier', 3) or 3)
-    if tier == 1:
-        score += 10; reasons.append('Metro city (+10)')
-    elif tier == 2:
-        score += 5; reasons.append('Tier 2 city (+5)')
+    if tier == 1:   score += 10; reasons.append('Metro city (+10)')
+    elif tier == 2: score += 5;  reasons.append('Tier 2 city (+5)')
 
-    if data.get('has_dessert_menu'):
-        score += 15; reasons.append('Has dessert/sweet menu (+15)')
-
-    if data.get('decision_maker_linkedin'):
-        score += 10; reasons.append('Decision maker on LinkedIn (+10)')
+    if data.get('has_dessert_menu'): score += 15; reasons.append('Has dessert/sweet menu (+15)')
+    if data.get('decision_maker_linkedin'): score += 10; reasons.append('Decision maker on LinkedIn (+10)')
 
     score = min(score, 100)
     priority = 'High' if score >= 70 else ('Medium' if score >= 40 else 'Low')
@@ -84,7 +71,37 @@ def calculate_lead_score(data: dict):
     return score, priority, reasoning
 
 
-# ─── MODELS ──────────────────────────────────────────────────────────────────
+def make_lead_obj(data: dict, status: str = "new") -> Lead:
+    score, priority, reasoning = calculate_lead_score(data)
+    return Lead(
+        id=str(uuid.uuid4()),
+        business_name=data.get('business_name', ''),
+        segment=data.get('segment', 'Restaurant'),
+        city=data.get('city', ''),
+        state=data.get('state', ''),
+        tier=int(data.get('tier', 1) or 1),
+        address=data.get('address', ''),
+        phone=data.get('phone', ''),
+        email=data.get('email', ''),
+        website=data.get('website', ''),
+        rating=float(data.get('rating', 0) or 0),
+        num_outlets=int(data.get('num_outlets', 1) or 1),
+        decision_maker_name=data.get('decision_maker_name', ''),
+        decision_maker_role=data.get('decision_maker_role', ''),
+        decision_maker_linkedin=data.get('decision_maker_linkedin', ''),
+        has_dessert_menu=bool(data.get('has_dessert_menu', False)),
+        hotel_category=data.get('hotel_category', ''),
+        is_chain=bool(data.get('is_chain', False)),
+        source=data.get('source', 'manual'),
+        monthly_volume_estimate=data.get('monthly_volume_estimate', ''),
+        ai_score=score,
+        ai_reasoning=reasoning,
+        priority=priority,
+        status=status,
+    )
+
+
+# ─── PYDANTIC MODELS ─────────────────────────────────────────────────────────
 
 class LeadCreate(BaseModel):
     business_name: str
@@ -122,102 +139,298 @@ class DiscoverRequest(BaseModel):
     state: str = ""
 
 
-# ─── HELPERS ─────────────────────────────────────────────────────────────────
+# ─── GOOGLE MAPS INTEGRATION ──────────────────────────────────────────────────
 
-def make_lead_doc(data: dict, status: str = "new") -> dict:
-    score, priority, reasoning = calculate_lead_score(data)
-    now = datetime.now(timezone.utc)
-    doc = {
-        "id": str(uuid.uuid4()),
-        **data,
-        "ai_score": score,
-        "ai_reasoning": reasoning,
-        "priority": priority,
-        "status": status,
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat()
+HOTEL_LUXURY = ["taj ", "oberoi", "leela", "four seasons", "jw marriott", "grand hyatt",
+                "ritz-carlton", "aman", "raffles", "st. regis", "the imperial", "trident"]
+HOTEL_UPSCALE = ["marriott", "hilton", "sheraton", "radisson", "novotel", "crowne plaza",
+                 "holiday inn", "hyatt regency", "courtyard", "westin", "renaissance", "le meridien"]
+
+SEGMENT_QUERIES = {
+    "Hotel": "hotels in {city}, India",
+    "Restaurant": "premium restaurants in {city}, India",
+    "Cafe": "cafes coffee shops in {city}, India",
+    "Bakery": "bakeries patisserie cake shops in {city}, India",
+    "CloudKitchen": "cloud kitchen food delivery in {city}, India",
+    "Catering": "catering company services in {city}, India",
+    "Mithai": "mithai sweet shops confectionery in {city}, India",
+    "IceCream": "ice cream parlors gelato in {city}, India",
+}
+
+
+def detect_hotel_category(name: str) -> str:
+    nl = name.lower()
+    if any(b in nl for b in HOTEL_LUXURY): return "5-star"
+    if any(b in nl for b in HOTEL_UPSCALE): return "4-star"
+    return "3-star"
+
+
+def gmaps_place_to_lead(place: dict, segment: str, city: str, state: str) -> dict:
+    name = place.get("displayName", {}).get("text", "")
+    address = place.get("formattedAddress", "")
+    rating = float(place.get("rating", 0) or 0)
+    phone = place.get("internationalPhoneNumber", "")
+    website = place.get("websiteUri", "")
+    rating_count = int(place.get("userRatingCount", 0) or 0)
+    tier = 1 if city in METRO_CITIES else 2
+
+    hotel_cat = detect_hotel_category(name) if segment == "Hotel" else ""
+    is_chain = rating_count > 500  # Likely chain if many reviews
+
+    lead = {
+        "business_name": name,
+        "segment": segment,
+        "city": city, "state": state, "tier": tier,
+        "address": address, "phone": phone, "email": "", "website": website,
+        "rating": rating,
+        "num_outlets": 5 if rating_count > 2000 else (3 if rating_count > 500 else 1),
+        "decision_maker_name": "", "decision_maker_role": "", "decision_maker_linkedin": "",
+        "has_dessert_menu": segment in ["Bakery", "Mithai", "IceCream", "Hotel", "Cafe"],
+        "hotel_category": hotel_cat,
+        "is_chain": is_chain,
+        "source": "google_maps",
+        "monthly_volume_estimate": ""
     }
-    return doc
+    score, priority, reasoning = calculate_lead_score(lead)
+    lead["ai_score"] = score; lead["ai_reasoning"] = reasoning; lead["priority"] = priority
+    return lead
 
 
-# ─── ROUTES ──────────────────────────────────────────────────────────────────
+async def search_google_maps(text_query: str, api_key: str) -> list:
+    url = "https://places.googleapis.com/v1/places:searchText"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.rating,places.internationalPhoneNumber,places.websiteUri,places.types,places.userRatingCount,places.businessStatus"
+    }
+    body = {"textQuery": text_query, "pageSize": 10, "languageCode": "en"}
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.post(url, headers=headers, json=body)
+            if resp.status_code == 200:
+                return resp.json().get("places", [])
+            logger.error(f"Google Maps API {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"Google Maps request failed: {e}")
+    return []
+
+
+# ─── LEAD SIMULATION ENGINE ───────────────────────────────────────────────────
+
+SEGMENT_TEMPLATES = {
+    "Restaurant": [
+        {"sfx": "Family Dhaba", "rating": 4.1, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "80-150 kg"},
+        {"sfx": "Multi-Cuisine Restaurant", "rating": 4.3, "outlets": 5, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
+        {"sfx": "Fine Dine Kitchen", "rating": 4.5, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
+        {"sfx": "Buffet & Banquet Hall", "rating": 4.0, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "300-500 kg"},
+        {"sfx": "North Indian Cuisine", "rating": 4.2, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "250-400 kg"},
+        {"sfx": "Pan-Asian Bistro", "rating": 4.4, "outlets": 4, "has_dessert": True, "is_chain": True, "vol": "150-280 kg"},
+        {"sfx": "Rooftop Restaurant", "rating": 4.6, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "120-220 kg"},
+        {"sfx": "Thali House", "rating": 4.1, "outlets": 6, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
+        {"sfx": "Coastal Seafood House", "rating": 4.3, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "100-180 kg"},
+        {"sfx": "Corporate Food Court", "rating": 3.9, "outlets": 12, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
+    ],
+    "Cafe": [
+        {"sfx": "Specialty Coffee House", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "100-200 kg"},
+        {"sfx": "Dessert & Brunch Cafe", "rating": 4.6, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "80-150 kg"},
+        {"sfx": "Artisan Coffee Roasters", "rating": 4.5, "outlets": 12, "has_dessert": True, "is_chain": True, "vol": "150-280 kg"},
+        {"sfx": "Book Cafe & Bistro", "rating": 4.3, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "40-80 kg"},
+        {"sfx": "Co-working Cafe", "rating": 4.0, "outlets": 5, "has_dessert": True, "is_chain": True, "vol": "100-180 kg"},
+        {"sfx": "Bubble Tea & Smoothie Bar", "rating": 4.2, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
+        {"sfx": "Waffle & Crepe Cafe", "rating": 4.5, "outlets": 6, "has_dessert": True, "is_chain": True, "vol": "120-200 kg"},
+        {"sfx": "Cold Brew Coffee Studio", "rating": 4.4, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "60-100 kg"},
+    ],
+    "Bakery": [
+        {"sfx": "Artisan Bakery & Patisserie", "rating": 4.5, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
+        {"sfx": "Cake & Confectionery Shop", "rating": 4.3, "outlets": 12, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
+        {"sfx": "French Bakery & Boulangerie", "rating": 4.7, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "250-450 kg"},
+        {"sfx": "Wedding Cake Studio", "rating": 4.6, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
+        {"sfx": "Sourdough & Bread House", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "300-550 kg"},
+        {"sfx": "Mithai & Pastry Shop", "rating": 4.2, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "600-1000 kg"},
+        {"sfx": "Cupcake & Macaron Boutique", "rating": 4.6, "outlets": 5, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
+        {"sfx": "Industrial Bread Factory", "rating": 4.0, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "1000-2000 kg"},
+    ],
+    "Hotel": [
+        {"sfx": "Business Hotel", "rating": 4.2, "outlets": 1, "has_dessert": True, "is_chain": False, "hotel_cat": "3-star", "vol": "100-200 kg"},
+        {"sfx": "Boutique Luxury Hotel", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "hotel_cat": "4-star", "vol": "250-450 kg"},
+        {"sfx": "Grand Heritage Hotel", "rating": 4.7, "outlets": 5, "has_dessert": True, "is_chain": True, "hotel_cat": "5-star", "vol": "600-1000 kg"},
+        {"sfx": "Airport Transit Hotel", "rating": 3.9, "outlets": 1, "has_dessert": True, "is_chain": True, "hotel_cat": "3-star", "vol": "80-150 kg"},
+        {"sfx": "Resort & Spa", "rating": 4.5, "outlets": 3, "has_dessert": True, "is_chain": False, "hotel_cat": "5-star", "vol": "400-700 kg"},
+        {"sfx": "Extended Stay Hotel", "rating": 4.1, "outlets": 2, "has_dessert": True, "is_chain": True, "hotel_cat": "3-star", "vol": "150-280 kg"},
+        {"sfx": "Convention & Wedding Hotel", "rating": 4.3, "outlets": 4, "has_dessert": True, "is_chain": False, "hotel_cat": "4-star", "vol": "500-900 kg"},
+        {"sfx": "Taj Partner Hotel", "rating": 4.6, "outlets": 2, "has_dessert": True, "is_chain": True, "hotel_cat": "5-star", "vol": "550-950 kg"},
+    ],
+    "CloudKitchen": [
+        {"sfx": "Cloud Eats Kitchen", "rating": 4.0, "outlets": 15, "has_dessert": False, "is_chain": True, "vol": "300-500 kg"},
+        {"sfx": "Dark Kitchen Hub", "rating": 3.9, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
+        {"sfx": "Multi-Brand Food Factory", "rating": 4.1, "outlets": 25, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
+        {"sfx": "Healthy Meal Prep Kitchen", "rating": 4.3, "outlets": 6, "has_dessert": False, "is_chain": True, "vol": "100-200 kg"},
+        {"sfx": "Dessert Delivery Kitchen", "rating": 4.2, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "250-450 kg"},
+        {"sfx": "Virtual Biryani House", "rating": 4.0, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
+        {"sfx": "Tiffin & Meal Box Kitchen", "rating": 3.8, "outlets": 5, "has_dessert": True, "is_chain": False, "vol": "150-280 kg"},
+    ],
+    "Catering": [
+        {"sfx": "Events & Catering Co", "rating": 4.2, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
+        {"sfx": "Corporate Caterers", "rating": 4.0, "outlets": 3, "has_dessert": True, "is_chain": True, "vol": "300-600 kg"},
+        {"sfx": "Wedding & Social Caterers", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "500-1000 kg"},
+        {"sfx": "Industrial & Hospital Catering", "rating": 3.9, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "800-1500 kg"},
+        {"sfx": "School & College Canteen Mgmt", "rating": 4.0, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "400-800 kg"},
+        {"sfx": "Outdoor Event Specialists", "rating": 4.3, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "600-1200 kg"},
+    ],
+    "Mithai": [
+        {"sfx": "Traditional Sweets & Namkeen", "rating": 4.3, "outlets": 6, "has_dessert": True, "is_chain": True, "vol": "600-1000 kg"},
+        {"sfx": "Mithai Bhandar", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
+        {"sfx": "Premium Sweets & Gift Shop", "rating": 4.5, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "800-1500 kg"},
+        {"sfx": "Kaju Katli & Barfi House", "rating": 4.3, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "300-600 kg"},
+        {"sfx": "Halwai & Sweet Maker", "rating": 4.1, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
+        {"sfx": "Festive Sweets Emporium", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
+        {"sfx": "Sugar-Free & Diet Sweets", "rating": 4.2, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
+    ],
+    "IceCream": [
+        {"sfx": "Artisan Creamery & Scoops", "rating": 4.5, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
+        {"sfx": "Artisan Gelato & Sorbet", "rating": 4.6, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
+        {"sfx": "Kulfi & Falooda Parlour", "rating": 4.2, "outlets": 5, "has_dessert": True, "is_chain": True, "vol": "200-400 kg"},
+        {"sfx": "Shake & Sundae Bar", "rating": 4.4, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "300-600 kg"},
+        {"sfx": "Premium Frozen Dessert Shop", "rating": 4.5, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "350-650 kg"},
+        {"sfx": "Natural Fruit Ice Cream", "rating": 4.3, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
+        {"sfx": "Waffle & Ice Cream Studio", "rating": 4.6, "outlets": 6, "has_dessert": True, "is_chain": False, "vol": "250-450 kg"},
+    ],
+}
+
+DM_NAMES = [
+    "Rajesh Kumar", "Priya Sharma", "Amit Singh", "Sunita Verma", "Vikram Nair",
+    "Deepa Iyer", "Sanjay Mehta", "Rohit Gupta", "Anita Patel", "Manish Tiwari",
+    "Kavita Reddy", "Suresh Menon", "Pooja Agarwal", "Arjun Pillai", "Neha Joshi"
+]
+DM_ROLES = [
+    "Procurement Manager", "F&B Director", "Purchase Head", "Owner",
+    "Operations Manager", "Supply Chain Head", "F&B Manager", "Founder & CEO", "Director - Procurement"
+]
+ROAD_NAMES = ["MG Road", "Main Street", "Park Road", "Station Road", "Brigade Road", "Link Road",
+              "Commercial Street", "Anna Salai", "Nehru Place", "Connaught Place", "Bandra-Kurla Complex"]
+PREFIXES = ["Golden", "Royal", "Classic", "Heritage", "Prime", "Urban", "The", "New",
+            "Elite", "Grand", "Imperial", "Prestige", "Sterling", "Vivanta", "Spice"]
+
+
+def generate_lead_simulation(city: str, segment: str, state: str) -> list:
+    tier = 1 if city in METRO_CITIES else 2
+    templates = SEGMENT_TEMPLATES.get(segment, SEGMENT_TEMPLATES["Restaurant"])
+    # Shuffle and take up to 8 templates for variety
+    shuffled = templates[:]
+    random.shuffle(shuffled)
+    selected = shuffled[:min(8, len(shuffled))]
+    results = []
+    used_names = set()
+    for tmpl in selected:
+        pfx = random.choice(PREFIXES)
+        name = f"{pfx} {city} {tmpl['sfx']}"
+        # Avoid duplicate names
+        if name in used_names:
+            pfx = random.choice([p for p in PREFIXES if p != pfx])
+            name = f"{pfx} {city} {tmpl['sfx']}"
+        used_names.add(name)
+        dm_name = random.choice(DM_NAMES)
+        lead = {
+            "business_name": name, "segment": segment,
+            "city": city, "state": state, "tier": tier,
+            "address": f"{random.randint(10, 250)}, {random.choice(ROAD_NAMES)}, {city}",
+            "phone": f"+91-{random.randint(7,9)}{random.randint(000000000, 999999999):09d}",
+            "email": "",
+            "website": "",
+            "rating": round(tmpl["rating"] + random.uniform(-0.2, 0.2), 1),
+            "num_outlets": tmpl["outlets"],
+            "decision_maker_name": dm_name,
+            "decision_maker_role": random.choice(DM_ROLES),
+            "decision_maker_linkedin": "",
+            "has_dessert_menu": tmpl.get("has_dessert", False),
+            "hotel_category": tmpl.get("hotel_cat", ""),
+            "is_chain": tmpl.get("is_chain", False),
+            "source": "ai_generated",
+            "monthly_volume_estimate": tmpl.get("vol", "")
+        }
+        score, priority, reasoning = calculate_lead_score(lead)
+        lead["ai_score"] = score; lead["ai_reasoning"] = reasoning; lead["priority"] = priority
+        results.append(lead)
+    return results
+
+
+# ─── API ROUTES ───────────────────────────────────────────────────────────────
 
 @api_router.get("/")
 async def root():
-    return {"message": "Dhampur Green HORECA Lead Intelligence API v1.0"}
+    return {"message": "Dhampur Green HORECA Lead Intelligence API v2.0 (PostgreSQL)"}
 
 
 @api_router.get("/dashboard/stats")
-async def get_dashboard_stats():
-    total_leads = await db.leads.count_documents({})
-    high_priority = await db.leads.count_documents({"priority": "High"})
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    new_this_week = await db.leads.count_documents({"created_at": {"$gte": week_ago}})
-    converted = await db.leads.count_documents({"status": "converted"})
-    conversion_rate = round((converted / total_leads * 100), 1) if total_leads > 0 else 0
+async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
+    total_leads = await db.scalar(select(func.count()).select_from(Lead))
+    high_priority = await db.scalar(select(func.count()).select_from(Lead).where(Lead.priority == "High"))
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    new_this_week = await db.scalar(select(func.count()).select_from(Lead).where(Lead.created_at >= week_ago))
+    converted = await db.scalar(select(func.count()).select_from(Lead).where(Lead.status == "converted"))
+    conversion_rate = round((converted / total_leads * 100), 1) if total_leads else 0
 
-    city_dist = await db.leads.aggregate([
-        {"$group": {"_id": "$city", "count": {"$sum": 1}}},
-        {"$sort": {"count": -1}}, {"$limit": 8}
-    ]).to_list(8)
+    city_rows = (await db.execute(
+        select(Lead.city, func.count(Lead.id).label("count"))
+        .group_by(Lead.city).order_by(func.count(Lead.id).desc()).limit(8)
+    )).all()
+    seg_rows = (await db.execute(
+        select(Lead.segment, func.count(Lead.id).label("count"))
+        .group_by(Lead.segment).order_by(func.count(Lead.id).desc())
+    )).all()
+    status_rows = (await db.execute(
+        select(Lead.status, func.count(Lead.id).label("count")).group_by(Lead.status)
+    )).all()
 
-    seg_dist = await db.leads.aggregate([
-        {"$group": {"_id": "$segment", "count": {"$sum": 1}}},
-        {"$sort": {"count": -1}}
-    ]).to_list(20)
-
-    status_dist = await db.leads.aggregate([
-        {"$group": {"_id": "$status", "count": {"$sum": 1}}}
-    ]).to_list(10)
-
-    recent = await db.leads.find({}, {"_id": 0}).sort("created_at", -1).limit(6).to_list(6)
-    top_leads = await db.leads.find({}, {"_id": 0}).sort("ai_score", -1).limit(5).to_list(5)
+    recent_leads = (await db.execute(
+        select(Lead).order_by(Lead.created_at.desc()).limit(6)
+    )).scalars().all()
+    top_leads = (await db.execute(
+        select(Lead).order_by(Lead.ai_score.desc()).limit(5)
+    )).scalars().all()
 
     return {
-        "total_leads": total_leads,
-        "high_priority": high_priority,
-        "new_this_week": new_this_week,
-        "converted": converted,
+        "total_leads": total_leads or 0,
+        "high_priority": high_priority or 0,
+        "new_this_week": new_this_week or 0,
+        "converted": converted or 0,
         "conversion_rate": conversion_rate,
-        "city_distribution": [{"city": x["_id"] or "Unknown", "count": x["count"]} for x in city_dist],
-        "segment_distribution": [{"segment": x["_id"] or "Unknown", "count": x["count"]} for x in seg_dist],
-        "status_distribution": [{"status": x["_id"] or "Unknown", "count": x["count"]} for x in status_dist],
-        "recent_leads": recent,
-        "top_leads": top_leads
+        "city_distribution": [{"city": r.city or "Unknown", "count": r.count} for r in city_rows],
+        "segment_distribution": [{"segment": r.segment or "Unknown", "count": r.count} for r in seg_rows],
+        "status_distribution": [{"status": r.status or "Unknown", "count": r.count} for r in status_rows],
+        "recent_leads": [l.to_dict() for l in recent_leads],
+        "top_leads": [l.to_dict() for l in top_leads],
     }
 
 
 @api_router.get("/leads")
 async def get_leads(
-    city: Optional[str] = None,
-    segment: Optional[str] = None,
-    priority: Optional[str] = None,
-    status: Optional[str] = None,
-    min_score: Optional[int] = None,
-    search: Optional[str] = None,
-    limit: int = 100,
-    skip: int = 0
+    city: Optional[str] = None, segment: Optional[str] = None,
+    priority: Optional[str] = None, status: Optional[str] = None,
+    min_score: Optional[int] = None, search: Optional[str] = None,
+    limit: int = 100, skip: int = 0,
+    db: AsyncSession = Depends(get_db)
 ):
-    query = {}
-    if city:
-        query['city'] = {'$regex': city, '$options': 'i'}
-    if segment:
-        query['segment'] = segment
-    if priority:
-        query['priority'] = priority
-    if status:
-        query['status'] = status
-    if min_score is not None:
-        query['ai_score'] = {'$gte': min_score}
+    conditions = []
+    if city:      conditions.append(Lead.city.ilike(f"%{city}%"))
+    if segment:   conditions.append(Lead.segment == segment)
+    if priority:  conditions.append(Lead.priority == priority)
+    if status:    conditions.append(Lead.status == status)
+    if min_score is not None: conditions.append(Lead.ai_score >= min_score)
     if search:
-        query['$or'] = [
-            {'business_name': {'$regex': search, '$options': 'i'}},
-            {'city': {'$regex': search, '$options': 'i'}},
-            {'decision_maker_name': {'$regex': search, '$options': 'i'}}
-        ]
-    leads = await db.leads.find(query, {"_id": 0}).sort("ai_score", -1).skip(skip).limit(limit).to_list(limit)
-    total = await db.leads.count_documents(query)
-    return {"leads": leads, "total": total}
+        conditions.append(or_(
+            Lead.business_name.ilike(f"%{search}%"),
+            Lead.city.ilike(f"%{search}%"),
+            Lead.decision_maker_name.ilike(f"%{search}%")
+        ))
+
+    base_q = select(Lead)
+    if conditions:
+        base_q = base_q.where(and_(*conditions))
+
+    leads = (await db.execute(base_q.order_by(Lead.ai_score.desc()).offset(skip).limit(limit))).scalars().all()
+    total = await db.scalar(select(func.count()).select_from(Lead).where(and_(*conditions)) if conditions else select(func.count()).select_from(Lead))
+    return {"leads": [l.to_dict() for l in leads], "total": total or 0}
 
 
 @api_router.get("/leads/csv-template")
@@ -234,7 +447,7 @@ async def get_csv_template():
 
 
 @api_router.post("/leads/upload-csv")
-async def upload_csv(file: UploadFile = File(...)):
+async def upload_csv(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     content = await file.read()
     try:
         text = content.decode('utf-8-sig')
@@ -242,12 +455,10 @@ async def upload_csv(file: UploadFile = File(...)):
         text = content.decode('latin-1')
 
     reader = csv.DictReader(io.StringIO(text))
-    created = []
-    errors = []
-
+    created, errors = [], []
     for i, row in enumerate(reader):
         try:
-            lead_data = {
+            data = {
                 "business_name": str(row.get('business_name', '')).strip(),
                 "segment": str(row.get('segment', 'Restaurant')).strip() or 'Restaurant',
                 "city": str(row.get('city', '')).strip(),
@@ -262,22 +473,21 @@ async def upload_csv(file: UploadFile = File(...)):
                 "decision_maker_name": str(row.get('decision_maker_name', '')).strip(),
                 "decision_maker_role": str(row.get('decision_maker_role', '')).strip(),
                 "decision_maker_linkedin": str(row.get('decision_maker_linkedin', '')).strip(),
-                "has_dessert_menu": str(row.get('has_dessert_menu', 'false')).lower().strip() in ('true', '1', 'yes'),
+                "has_dessert_menu": str(row.get('has_dessert_menu', 'false')).lower() in ('true', '1', 'yes'),
                 "hotel_category": str(row.get('hotel_category', '')).strip(),
-                "is_chain": str(row.get('is_chain', 'false')).lower().strip() in ('true', '1', 'yes'),
+                "is_chain": str(row.get('is_chain', 'false')).lower() in ('true', '1', 'yes'),
                 "source": "csv_upload",
                 "monthly_volume_estimate": str(row.get('monthly_volume_estimate', '')).strip()
             }
-            if not lead_data['business_name'] or not lead_data['city']:
-                errors.append(f"Row {i + 2}: Missing business_name or city")
-                continue
-            doc = make_lead_doc(lead_data)
-            await db.leads.insert_one(doc)
-            doc.pop('_id', None)
-            created.append(doc)
+            if not data['business_name'] or not data['city']:
+                errors.append(f"Row {i+2}: Missing business_name or city"); continue
+            lead_obj = make_lead_obj(data)
+            db.add(lead_obj)
+            created.append(lead_obj.to_dict())
         except Exception as e:
-            errors.append(f"Row {i + 2}: {str(e)}")
+            errors.append(f"Row {i+2}: {str(e)}")
 
+    await db.commit()
     return {"created": len(created), "errors": errors}
 
 
@@ -286,151 +496,82 @@ async def discover_leads(req: DiscoverRequest):
     city = req.city.strip()
     segment = req.segment.strip()
     state = req.state.strip()
-    tier = 1 if city in ["Mumbai", "Delhi", "Bangalore", "Hyderabad", "Chennai", "Kolkata", "Pune", "Ahmedabad"] else 2
-
-    templates_map = {
-        "Hotel": [
-            {"hotel_category": "5-star", "rating": 4.7, "num_outlets": 1, "has_dessert_menu": True, "is_chain": False},
-            {"hotel_category": "4-star", "rating": 4.3, "num_outlets": 2, "has_dessert_menu": True, "is_chain": True},
-            {"hotel_category": "3-star", "rating": 4.0, "num_outlets": 1, "has_dessert_menu": False, "is_chain": False},
-        ],
-        "Restaurant": [
-            {"is_chain": True, "num_outlets": 8, "rating": 4.2, "has_dessert_menu": True, "hotel_category": ""},
-            {"is_chain": False, "num_outlets": 1, "rating": 4.6, "has_dessert_menu": True, "hotel_category": ""},
-            {"is_chain": True, "num_outlets": 15, "rating": 4.0, "has_dessert_menu": False, "hotel_category": ""},
-        ],
-        "Cafe": [
-            {"is_chain": True, "num_outlets": 12, "rating": 4.3, "has_dessert_menu": True, "hotel_category": ""},
-            {"is_chain": False, "num_outlets": 2, "rating": 4.6, "has_dessert_menu": True, "hotel_category": ""},
-        ],
-        "Bakery": [
-            {"is_chain": True, "num_outlets": 20, "rating": 4.4, "has_dessert_menu": True, "hotel_category": ""},
-            {"is_chain": False, "num_outlets": 3, "rating": 4.6, "has_dessert_menu": True, "hotel_category": ""},
-            {"is_chain": True, "num_outlets": 50, "rating": 4.1, "has_dessert_menu": True, "hotel_category": ""},
-        ],
-        "CloudKitchen": [
-            {"is_chain": True, "num_outlets": 25, "rating": 3.9, "has_dessert_menu": False, "hotel_category": ""},
-            {"is_chain": False, "num_outlets": 5, "rating": 4.2, "has_dessert_menu": True, "hotel_category": ""},
-        ],
-        "Catering": [
-            {"is_chain": True, "num_outlets": 4, "rating": 4.2, "has_dessert_menu": True, "hotel_category": ""},
-            {"is_chain": False, "num_outlets": 1, "rating": 4.0, "has_dessert_menu": True, "hotel_category": ""},
-        ],
-        "Mithai": [
-            {"is_chain": True, "num_outlets": 35, "rating": 4.4, "has_dessert_menu": True, "hotel_category": ""},
-            {"is_chain": False, "num_outlets": 1, "rating": 4.3, "has_dessert_menu": True, "hotel_category": ""},
-        ],
-        "IceCream": [
-            {"is_chain": True, "num_outlets": 60, "rating": 4.3, "has_dessert_menu": True, "hotel_category": ""},
-            {"is_chain": False, "num_outlets": 3, "rating": 4.5, "has_dessert_menu": True, "hotel_category": ""},
-        ]
-    }
-
-    names_map = {
-        "Hotel": ["Grand Palace Hotel", "Royal Heritage Inn", "Premier Suites", "The Comfort Hotel"],
-        "Restaurant": ["Spice Garden", "Heritage Kitchen", "Royal Dining", "Flavors Bistro"],
-        "Cafe": ["The Brew House", "Morning Roast", "Cafe Misto", "The Coffee Co"],
-        "Bakery": ["Golden Crust Bakery", "The Patisserie", "Sweet Crumbs", "Bake House"],
-        "CloudKitchen": ["Quick Bites Kitchen", "Cloud Eats", "Daily Fresh Kitchen", "Gourmet Delivery"],
-        "Catering": ["Royal Events Catering", "Premier Caterers", "Grand Hospitality"],
-        "Mithai": ["Sweet Palace Mithai", "Traditional Sweets", "Mithai Corner"],
-        "IceCream": ["Cool Scoops Creamery", "Creamy Delights", "The Freeze Point"]
-    }
-
-    dm_names = ["Rajesh Kumar", "Priya Sharma", "Amit Singh", "Sunita Verma", "Vikram Nair", "Deepa Iyer"]
-    dm_roles = ["Procurement Manager", "F&B Director", "Head Chef", "Purchase Head", "Owner"]
-
-    templates = templates_map.get(segment, templates_map["Restaurant"])
-    name_opts = names_map.get(segment, ["Business Co"])
     results = []
 
-    for i, tmpl in enumerate(templates):
-        name_base = name_opts[i % len(name_opts)]
-        name = f"{name_base} {city}" if i == 0 else f"{city} {name_base}"
-        dm = random.choice(dm_names)
-        role = random.choice(dm_roles)
-        lead = {
-            "business_name": name,
-            "segment": segment,
-            "city": city,
-            "state": state,
-            "tier": tier,
-            "address": f"{random.randint(10, 200)}, {random.choice(['MG Road', 'Main Street', 'Central Avenue', 'Park Road'])}, {city}",
-            "phone": f"+91-{random.randint(70000, 99999)}{random.randint(10000, 99999)}",
-            "email": f"procurement@{name.lower().replace(' ', '')[:18]}.com",
-            "website": f"www.{name.lower().replace(' ', '')[:15]}.com",
-            "rating": tmpl.get('rating', 4.0),
-            "num_outlets": tmpl.get('num_outlets', 1),
-            "decision_maker_name": dm,
-            "decision_maker_role": role,
-            "decision_maker_linkedin": f"linkedin.com/in/{dm.lower().replace(' ', '-')}" if tmpl.get('is_chain') else "",
-            "has_dessert_menu": tmpl.get('has_dessert_menu', False),
-            "hotel_category": tmpl.get('hotel_category', ''),
-            "is_chain": tmpl.get('is_chain', False),
-            "source": "api_discovery",
-            "monthly_volume_estimate": ""
-        }
-        s, p, r = calculate_lead_score(lead)
-        lead["ai_score"] = s
-        lead["ai_reasoning"] = r
-        lead["priority"] = p
-        results.append(lead)
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+    if api_key:
+        query = SEGMENT_QUERIES.get(segment, f"{segment} in {city}, India").replace("{city}", city)
+        places = await search_google_maps(query, api_key)
+        for place in places:
+            status = place.get("businessStatus", "")
+            if status and status != "OPERATIONAL":
+                continue
+            lead = gmaps_place_to_lead(place, segment, city, state)
+            if lead.get("business_name"):
+                results.append(lead)
+
+    # Always supplement with AI-generated simulation
+    simulated = generate_lead_simulation(city, segment, state)
+    results.extend(simulated)
 
     return results
 
 
 @api_router.post("/leads/bulk-create")
-async def bulk_create_leads(req: BulkCreateRequest):
+async def bulk_create_leads(req: BulkCreateRequest, db: AsyncSession = Depends(get_db)):
     created = []
-    for lead_dict in req.leads:
-        lead_dict.pop('ai_score', None)
-        lead_dict.pop('ai_reasoning', None)
-        lead_dict.pop('priority', None)
-        doc = make_lead_doc(lead_dict)
-        await db.leads.insert_one(doc)
-        doc.pop('_id', None)
-        created.append(doc)
+    for ld in req.leads:
+        for k in ['ai_score', 'ai_reasoning', 'priority']:
+            ld.pop(k, None)
+        obj = make_lead_obj(ld)
+        db.add(obj)
+        created.append(obj.to_dict())
+    await db.commit()
     return {"created": len(created), "leads": created}
 
 
 @api_router.post("/leads")
-async def create_lead(lead: LeadCreate):
-    doc = make_lead_doc(lead.model_dump())
-    await db.leads.insert_one(doc)
-    doc.pop('_id', None)
-    return doc
+async def create_lead(lead: LeadCreate, db: AsyncSession = Depends(get_db)):
+    obj = make_lead_obj(lead.model_dump())
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return obj.to_dict()
 
 
 @api_router.get("/leads/{lead_id}")
-async def get_lead(lead_id: str):
-    lead = await db.leads.find_one({"id": lead_id}, {"_id": 0})
+async def get_lead(lead_id: str, db: AsyncSession = Depends(get_db)):
+    lead = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
-    return lead
+    return lead.to_dict()
 
 
 @api_router.put("/leads/{lead_id}/status")
-async def update_lead_status(lead_id: str, body: LeadStatusUpdate):
-    result = await db.leads.update_one(
-        {"id": lead_id},
-        {"$set": {"status": body.status, "updated_at": datetime.now(timezone.utc).isoformat()}}
+async def update_lead_status(lead_id: str, body: LeadStatusUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        sql_update(Lead).where(Lead.id == lead_id)
+        .values(status=body.status, updated_at=datetime.now(timezone.utc))
     )
-    if result.matched_count == 0:
+    if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Lead not found")
-    return await db.leads.find_one({"id": lead_id}, {"_id": 0})
+    await db.commit()
+    lead = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
+    return lead.to_dict()
 
 
 @api_router.delete("/leads/{lead_id}")
-async def delete_lead(lead_id: str):
-    result = await db.leads.delete_one({"id": lead_id})
-    if result.deleted_count == 0:
+async def delete_lead(lead_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(sql_delete(Lead).where(Lead.id == lead_id))
+    if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Lead not found")
+    await db.commit()
     return {"message": "Lead deleted"}
 
 
 @api_router.post("/leads/{lead_id}/qualify-ai")
-async def qualify_lead_ai(lead_id: str):
-    lead = await db.leads.find_one({"id": lead_id}, {"_id": 0})
+async def qualify_lead_ai(lead_id: str, db: AsyncSession = Depends(get_db)):
+    lead = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
 
@@ -440,60 +581,44 @@ async def qualify_lead_ai(lead_id: str):
 
     try:
         chat = LlmChat(
-            api_key=api_key,
-            session_id=f"qualify-{lead_id}-{uuid.uuid4()}",
-            system_message="You are a B2B sales qualification expert for Dhampur Green, a premium Indian sugar and sweetener brand. Analyze HORECA businesses for their monthly sugar consumption potential and buying readiness."
+            api_key=api_key, session_id=f"qualify-{lead_id}-{uuid.uuid4()}",
+            system_message="You are a B2B sales qualification expert for Dhampur Green, India's premium sugar and sweetener brand."
         ).with_model("openai", "gpt-5.2")
 
-        prompt = f"""Qualify this HORECA business as a lead for Dhampur Green (premium sugar/jaggery supplier):
+        prompt = f"""Qualify this HORECA business for Dhampur Green (sugar/jaggery supplier):
+Business: {lead.business_name}, Segment: {lead.segment}
+Location: {lead.city}, {lead.state or 'India'} | Rating: {lead.rating}/5 | Outlets: {lead.num_outlets}
+Hotel Category: {lead.hotel_category or 'N/A'} | Dessert Menu: {lead.has_dessert_menu} | Chain: {lead.is_chain}
 
-Business: {lead['business_name']}
-Segment: {lead['segment']}
-Location: {lead['city']}, {lead.get('state', 'India')}
-Rating: {lead['rating']}/5 | Outlets: {lead['num_outlets']}
-Hotel Category: {lead.get('hotel_category', 'N/A')}
-Has Dessert Menu: {lead.get('has_dessert_menu', False)}
-Is Chain: {lead.get('is_chain', False)}
-
-Respond ONLY with valid JSON (no markdown):
-{{
-  "ai_score": <integer 0-100>,
-  "monthly_volume_kg": "<estimated range like '200-500 kg'>",
-  "qualification_summary": "<2-3 sentences about this prospect>",
-  "sugar_use_cases": ["<use case 1>", "<use case 2>", "<use case 3>"],
-  "key_insight": "<one actionable sales insight>",
-  "priority": "<High/Medium/Low>",
-  "best_contact_time": "<recommendation>"
-}}"""
+Respond ONLY with valid JSON:
+{{"ai_score":<0-100>,"monthly_volume_kg":"<range>","qualification_summary":"<2-3 sentences>","sugar_use_cases":["<uc1>","<uc2>","<uc3>"],"key_insight":"<sales insight>","priority":"<High/Medium/Low>","best_contact_time":"<recommendation>"}}"""
 
         response = await chat.send_message(UserMessage(text=prompt))
         json_str = response.strip()
-        if '```json' in json_str:
-            json_str = json_str.split('```json')[1].split('```')[0]
-        elif '```' in json_str:
-            json_str = json_str.split('```')[1].split('```')[0]
-
+        if '```json' in json_str: json_str = json_str.split('```json')[1].split('```')[0]
+        elif '```' in json_str: json_str = json_str.split('```')[1].split('```')[0]
         ai_data = json.loads(json_str.strip())
-        await db.leads.update_one(
-            {"id": lead_id},
-            {"$set": {
-                "ai_score": int(ai_data.get('ai_score', lead['ai_score'])),
-                "ai_reasoning": ai_data.get('qualification_summary', lead['ai_reasoning']),
-                "priority": ai_data.get('priority', lead['priority']),
-                "monthly_volume_estimate": ai_data.get('monthly_volume_kg', ''),
-                "updated_at": datetime.now(timezone.utc).isoformat()
-            }}
+
+        await db.execute(
+            sql_update(Lead).where(Lead.id == lead_id).values(
+                ai_score=int(ai_data.get('ai_score', lead.ai_score)),
+                ai_reasoning=ai_data.get('qualification_summary', lead.ai_reasoning),
+                priority=ai_data.get('priority', lead.priority),
+                monthly_volume_estimate=ai_data.get('monthly_volume_kg', ''),
+                updated_at=datetime.now(timezone.utc)
+            )
         )
-        updated = await db.leads.find_one({"id": lead_id}, {"_id": 0})
-        return {"lead": updated, "ai_analysis": ai_data}
+        await db.commit()
+        updated = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one()
+        return {"lead": updated.to_dict(), "ai_analysis": ai_data}
     except Exception as e:
         logger.error(f"AI qualify error: {e}")
         raise HTTPException(status_code=500, detail=f"AI qualification failed: {str(e)}")
 
 
 @api_router.post("/leads/{lead_id}/generate-email")
-async def generate_email(lead_id: str):
-    lead = await db.leads.find_one({"id": lead_id}, {"_id": 0})
+async def generate_email(lead_id: str, db: AsyncSession = Depends(get_db)):
+    lead = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
 
@@ -503,123 +628,109 @@ async def generate_email(lead_id: str):
 
     try:
         chat = LlmChat(
-            api_key=api_key,
-            session_id=f"email-{lead_id}-{uuid.uuid4()}",
-            system_message="You are an expert B2B sales copywriter for Dhampur Green, India's premium sugar and sweetener brand supplying HORECA businesses. Write concise, personalized, results-oriented sales emails."
+            api_key=api_key, session_id=f"email-{lead_id}-{uuid.uuid4()}",
+            system_message="You are an expert B2B sales copywriter for Dhampur Green, India's premium sugar and sweetener brand supplying HORECA businesses."
         ).with_model("openai", "gpt-5.2")
 
-        dm = lead.get('decision_maker_name') or 'Procurement Manager'
-        role = lead.get('decision_maker_role') or 'F&B Head'
+        dm = lead.decision_maker_name or 'Procurement Manager'
         first_name = dm.split()[0] if dm else 'Sir/Madam'
 
         prompt = f"""Write a personalized B2B outreach email for Dhampur Green targeting:
+Business: {lead.business_name} ({lead.segment}, {lead.city})
+Decision Maker: {dm} ({lead.decision_maker_role or 'F&B Head'})
+Rating: {lead.rating}/5 | Outlets: {lead.num_outlets} | Dessert Menu: {lead.has_dessert_menu}
+Monthly Volume Estimate: {lead.monthly_volume_estimate or 'Unknown'}
 
-Business: {lead['business_name']} ({lead['segment']}, {lead['city']})
-Decision Maker: {dm} ({role})
-Rating: {lead['rating']}/5 | Outlets: {lead['num_outlets']}
-Dessert Menu: {lead.get('has_dessert_menu', False)} | Hotel: {lead.get('hotel_category', 'N/A')}
-Est. Monthly Volume: {lead.get('monthly_volume_estimate', 'Unknown')}
+Dhampur Green Products: Premium refined sugar (M30/S30), sulphur-free jaggery, brown sugar, organic cane sugar, khandsari, icing sugar.
 
-Dhampur Green Products: Premium refined sugar (M30, S30), sulphur-free jaggery, brown sugar, organic cane sugar, khandsari, icing sugar.
-
-Write a 5-7 line professional email:
-1. Specific subject line
-2. Personalized opener mentioning the business name
-3. Value proposition for their segment
-4. One product recommendation
-5. Soft CTA (15-min call)
-6. Sign-off: "Arjun Mehta | Regional Sales Manager, Dhampur Green | +91-98765-43210 | arjun.mehta@dhampurgreen.com"
+Write a 5-7 line professional email with specific subject, personalized opener, value prop, product rec, soft CTA, sign-off from "Arjun Mehta | Regional Sales Manager, Dhampur Green | +91-98765-43210"
 
 Format EXACTLY:
-SUBJECT: [subject line]
+SUBJECT: [subject]
 
 Dear {first_name},
-
-[email body]"""
+[body]"""
 
         response = await chat.send_message(UserMessage(text=prompt))
         lines = response.strip().split('\n')
-        subject = ""
-        body_lines = []
-        past_subject = False
+        subject, body_lines, past_subject = "", [], False
         for line in lines:
             if line.startswith('SUBJECT:') and not past_subject:
-                subject = line.replace('SUBJECT:', '').strip()
-                past_subject = True
+                subject = line.replace('SUBJECT:', '').strip(); past_subject = True
             else:
                 body_lines.append(line)
         body = '\n'.join(body_lines).strip()
 
-        now = datetime.now(timezone.utc)
-        doc = {
-            "id": str(uuid.uuid4()),
-            "lead_id": lead_id,
-            "lead_name": lead['business_name'],
-            "lead_city": lead['city'],
-            "lead_segment": lead['segment'],
-            "subject": subject,
-            "body": body,
-            "status": "draft",
-            "generated_at": now.isoformat()
-        }
-        await db.outreach_emails.insert_one(doc)
-        doc.pop('_id', None)
-        return doc
+        email_obj = OutreachEmail(
+            id=str(uuid.uuid4()), lead_id=lead_id,
+            lead_name=lead.business_name, lead_city=lead.city, lead_segment=lead.segment,
+            subject=subject, body=body, status="draft"
+        )
+        db.add(email_obj)
+        await db.commit()
+        await db.refresh(email_obj)
+        return email_obj.to_dict()
     except Exception as e:
         logger.error(f"Email gen error: {e}")
         raise HTTPException(status_code=500, detail=f"Email generation failed: {str(e)}")
 
 
 @api_router.get("/outreach/emails")
-async def get_all_emails(limit: int = 50):
-    emails = await db.outreach_emails.find({}, {"_id": 0}).sort("generated_at", -1).limit(limit).to_list(limit)
-    return emails
+async def get_all_emails(limit: int = 50, db: AsyncSession = Depends(get_db)):
+    emails = (await db.execute(
+        select(OutreachEmail).order_by(OutreachEmail.generated_at.desc()).limit(limit)
+    )).scalars().all()
+    return [e.to_dict() for e in emails]
 
 
 @api_router.get("/outreach/{lead_id}/emails")
-async def get_lead_emails(lead_id: str):
-    emails = await db.outreach_emails.find({"lead_id": lead_id}, {"_id": 0}).sort("generated_at", -1).to_list(20)
-    return emails
+async def get_lead_emails(lead_id: str, db: AsyncSession = Depends(get_db)):
+    emails = (await db.execute(
+        select(OutreachEmail).where(OutreachEmail.lead_id == lead_id)
+        .order_by(OutreachEmail.generated_at.desc()).limit(20)
+    )).scalars().all()
+    return [e.to_dict() for e in emails]
 
 
 @api_router.put("/outreach/{email_id}/mark-sent")
-async def mark_email_sent(email_id: str):
-    await db.outreach_emails.update_one(
-        {"id": email_id},
-        {"$set": {"status": "sent", "sent_at": datetime.now(timezone.utc).isoformat()}}
+async def mark_email_sent(email_id: str, db: AsyncSession = Depends(get_db)):
+    await db.execute(
+        sql_update(OutreachEmail).where(OutreachEmail.id == email_id)
+        .values(status="sent", sent_at=datetime.now(timezone.utc))
     )
-    email = await db.outreach_emails.find_one({"id": email_id}, {"_id": 0})
+    await db.commit()
+    email = (await db.execute(select(OutreachEmail).where(OutreachEmail.id == email_id))).scalar_one_or_none()
     if not email:
         raise HTTPException(status_code=404, detail="Email not found")
-    return email
+    return email.to_dict()
 
 
 @api_router.post("/seed-mock-data")
-async def seed_mock_data():
-    count = await db.leads.count_documents({})
-    if count > 0:
+async def seed_mock_data(db: AsyncSession = Depends(get_db)):
+    count = await db.scalar(select(func.count()).select_from(Lead))
+    if count and count > 0:
         return {"message": f"Already has {count} leads", "count": count}
 
     mock_leads = [
-        {"business_name": "The Taj Mahal Palace", "segment": "Hotel", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Apollo Bunder, Colaba, Mumbai - 400001", "phone": "+91-22-6665-3366", "email": "fbprocurement@tajhotels.com", "website": "www.tajhotels.com", "rating": 4.8, "num_outlets": 12, "decision_maker_name": "Rakesh Nair", "decision_maker_role": "F&B Procurement Director", "decision_maker_linkedin": "linkedin.com/in/rakesh-nair-taj", "has_dessert_menu": True, "hotel_category": "5-star", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "800-1200 kg"},
+        {"business_name": "The Taj Mahal Palace", "segment": "Hotel", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Apollo Bunder, Colaba, Mumbai", "phone": "+91-22-6665-3366", "email": "fbprocurement@tajhotels.com", "website": "www.tajhotels.com", "rating": 4.8, "num_outlets": 12, "decision_maker_name": "Rakesh Nair", "decision_maker_role": "F&B Procurement Director", "decision_maker_linkedin": "linkedin.com/in/rakesh-nair-taj", "has_dessert_menu": True, "hotel_category": "5-star", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "800-1200 kg"},
         {"business_name": "Grand Hyatt Mumbai", "segment": "Hotel", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Santacruz East, Mumbai", "phone": "+91-22-6676-1234", "email": "procurement@grandhyattmumbai.com", "website": "www.grandhyatt.com", "rating": 4.6, "num_outlets": 2, "decision_maker_name": "Priya Sharma", "decision_maker_role": "Purchase Manager", "decision_maker_linkedin": "linkedin.com/in/priya-sharma-hyatt", "has_dessert_menu": True, "hotel_category": "5-star", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "600-800 kg"},
         {"business_name": "Monginis Cake Shop Chain", "segment": "Bakery", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Multiple locations, Mumbai", "phone": "+91-22-2376-5678", "email": "procurement@monginis.net", "website": "www.monginis.net", "rating": 4.2, "num_outlets": 230, "decision_maker_name": "Suhail Khorakiwala", "decision_maker_role": "Procurement Head", "decision_maker_linkedin": "linkedin.com/in/khorakiwala-monginis", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "5000-8000 kg"},
-        {"business_name": "La Folie Patisserie", "segment": "Bakery", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Khar West, Mumbai - 400052", "phone": "+91-22-6503-4567", "email": "hello@lafolie.in", "website": "www.lafolie.in", "rating": 4.7, "num_outlets": 6, "decision_maker_name": "Sanjana Patel", "decision_maker_role": "Owner & Head Pastry Chef", "decision_maker_linkedin": "linkedin.com/in/sanjana-lafolie", "has_dessert_menu": True, "hotel_category": "", "is_chain": False, "source": "mock_data", "monthly_volume_estimate": "300-500 kg"},
-        {"business_name": "Natural Ice Cream", "segment": "IceCream", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Juhu, Mumbai - 400049", "phone": "+91-22-2618-3456", "email": "supply@naturals.in", "website": "www.naturals.in", "rating": 4.5, "num_outlets": 135, "decision_maker_name": "Raghunandan Kamath", "decision_maker_role": "Owner", "decision_maker_linkedin": "linkedin.com/in/naturals-kamath", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "3000-5000 kg"},
-        {"business_name": "Kailash Parbat Mithai", "segment": "Mithai", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Colaba, Mumbai - 400005", "phone": "+91-22-2202-9456", "email": "orders@kailashparbat.com", "website": "www.kailashparbat.in", "rating": 4.3, "num_outlets": 22, "decision_maker_name": "Vijay Gidwani", "decision_maker_role": "Purchase Manager", "decision_maker_linkedin": "linkedin.com/in/kailash-parbat", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "1500-2500 kg"},
+        {"business_name": "La Folie Patisserie", "segment": "Bakery", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Khar West, Mumbai", "phone": "+91-22-6503-4567", "email": "hello@lafolie.in", "website": "www.lafolie.in", "rating": 4.7, "num_outlets": 6, "decision_maker_name": "Sanjana Patel", "decision_maker_role": "Owner & Head Pastry Chef", "decision_maker_linkedin": "linkedin.com/in/sanjana-lafolie", "has_dessert_menu": True, "hotel_category": "", "is_chain": False, "source": "mock_data", "monthly_volume_estimate": "300-500 kg"},
+        {"business_name": "Natural Ice Cream", "segment": "IceCream", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Juhu, Mumbai", "phone": "+91-22-2618-3456", "email": "supply@naturals.in", "website": "www.naturals.in", "rating": 4.5, "num_outlets": 135, "decision_maker_name": "Raghunandan Kamath", "decision_maker_role": "Owner", "decision_maker_linkedin": "linkedin.com/in/naturals-kamath", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "3000-5000 kg"},
+        {"business_name": "Kailash Parbat Mithai", "segment": "Mithai", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Colaba, Mumbai", "phone": "+91-22-2202-9456", "email": "orders@kailashparbat.com", "website": "www.kailashparbat.in", "rating": 4.3, "num_outlets": 22, "decision_maker_name": "Vijay Gidwani", "decision_maker_role": "Purchase Manager", "decision_maker_linkedin": "linkedin.com/in/kailash-parbat", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "1500-2500 kg"},
         {"business_name": "Smoke House Deli Mumbai", "segment": "Restaurant", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Bandra West, Mumbai", "phone": "+91-22-6520-3456", "email": "procurement@smokehousedeli.com", "website": "www.smokehousedeli.com", "rating": 4.3, "num_outlets": 8, "decision_maker_name": "Manish Mehrotra", "decision_maker_role": "F&B Director", "decision_maker_linkedin": "linkedin.com/in/smokehouse-procurement", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "200-400 kg"},
-        {"business_name": "BOX8 Cloud Kitchen", "segment": "CloudKitchen", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Andheri East, Mumbai - 400069", "phone": "+91-22-7123-8901", "email": "supply@box8.in", "website": "www.box8.in", "rating": 4.0, "num_outlets": 45, "decision_maker_name": "Anshul Gupta", "decision_maker_role": "Supply Chain Manager", "decision_maker_linkedin": "linkedin.com/in/box8-supply-chain", "has_dessert_menu": False, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "500-800 kg"},
+        {"business_name": "BOX8 Cloud Kitchen", "segment": "CloudKitchen", "city": "Mumbai", "state": "Maharashtra", "tier": 1, "address": "Andheri East, Mumbai", "phone": "+91-22-7123-8901", "email": "supply@box8.in", "website": "www.box8.in", "rating": 4.0, "num_outlets": 45, "decision_maker_name": "Anshul Gupta", "decision_maker_role": "Supply Chain Manager", "decision_maker_linkedin": "linkedin.com/in/box8-supply-chain", "has_dessert_menu": False, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "500-800 kg"},
         {"business_name": "The Leela Palace Delhi", "segment": "Hotel", "city": "Delhi", "state": "Delhi", "tier": 1, "address": "Diplomatic Enclave, Chanakyapuri", "phone": "+91-11-3933-1234", "email": "procurement@theleela.com", "website": "www.theleela.com", "rating": 4.8, "num_outlets": 8, "decision_maker_name": "Vikram Nair", "decision_maker_role": "F&B Procurement Head", "decision_maker_linkedin": "linkedin.com/in/vikram-nair-leela", "has_dessert_menu": True, "hotel_category": "5-star", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "700-1000 kg"},
-        {"business_name": "The Baker's Dozen Delhi", "segment": "Bakery", "city": "Delhi", "state": "Delhi", "tier": 1, "address": "Khan Market, Delhi - 110003", "phone": "+91-11-4150-7890", "email": "procurement@bakersdozen.in", "website": "www.thebakersdozen.in", "rating": 4.5, "num_outlets": 28, "decision_maker_name": "Aditi Handa", "decision_maker_role": "CEO & Founder", "decision_maker_linkedin": "linkedin.com/in/aditi-handa-bakers", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "800-1200 kg"},
-        {"business_name": "Haldiram's Delhi", "segment": "Mithai", "city": "Delhi", "state": "Delhi", "tier": 1, "address": "Lajpat Nagar, Delhi - 110024", "phone": "+91-11-2921-5678", "email": "supply@haldirams.com", "website": "www.haldirams.com", "rating": 4.4, "num_outlets": 150, "decision_maker_name": "Procurement Director", "decision_maker_role": "Procurement Director", "decision_maker_linkedin": "linkedin.com/in/haldirams-procurement", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "10000-20000 kg"},
-        {"business_name": "Blue Tokai Coffee Roasters", "segment": "Cafe", "city": "Delhi", "state": "Delhi", "tier": 1, "address": "Saket, Delhi - 110017", "phone": "+91-11-4200-5678", "email": "wholesale@bluetokaicoffee.com", "website": "www.bluetokaicoffee.com", "rating": 4.5, "num_outlets": 30, "decision_maker_name": "Matt Chitharanjan", "decision_maker_role": "Founder", "decision_maker_linkedin": "linkedin.com/in/matt-bluetokai", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "200-400 kg"},
+        {"business_name": "The Baker's Dozen Delhi", "segment": "Bakery", "city": "Delhi", "state": "Delhi", "tier": 1, "address": "Khan Market, Delhi", "phone": "+91-11-4150-7890", "email": "procurement@bakersdozen.in", "website": "www.thebakersdozen.in", "rating": 4.5, "num_outlets": 28, "decision_maker_name": "Aditi Handa", "decision_maker_role": "CEO & Founder", "decision_maker_linkedin": "linkedin.com/in/aditi-handa-bakers", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "800-1200 kg"},
+        {"business_name": "Haldiram's Delhi", "segment": "Mithai", "city": "Delhi", "state": "Delhi", "tier": 1, "address": "Lajpat Nagar, Delhi", "phone": "+91-11-2921-5678", "email": "supply@haldirams.com", "website": "www.haldirams.com", "rating": 4.4, "num_outlets": 150, "decision_maker_name": "Procurement Director", "decision_maker_role": "Procurement Director", "decision_maker_linkedin": "linkedin.com/in/haldirams-procurement", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "10000-20000 kg"},
+        {"business_name": "Blue Tokai Coffee Roasters", "segment": "Cafe", "city": "Delhi", "state": "Delhi", "tier": 1, "address": "Saket, Delhi", "phone": "+91-11-4200-5678", "email": "wholesale@bluetokaicoffee.com", "website": "www.bluetokaicoffee.com", "rating": 4.5, "num_outlets": 30, "decision_maker_name": "Matt Chitharanjan", "decision_maker_role": "Founder", "decision_maker_linkedin": "linkedin.com/in/matt-bluetokai", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "200-400 kg"},
         {"business_name": "Punjab Grill Delhi", "segment": "Restaurant", "city": "Delhi", "state": "Delhi", "tier": 1, "address": "Select Citywalk, Saket, Delhi", "phone": "+91-11-4100-7890", "email": "procurement@punjabgrill.in", "website": "www.punjabgrill.in", "rating": 4.2, "num_outlets": 15, "decision_maker_name": "Sanjeev Nanda", "decision_maker_role": "Director Operations", "decision_maker_linkedin": "linkedin.com/in/punjab-grill-ops", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "400-700 kg"},
         {"business_name": "ITC Windsor Bengaluru", "segment": "Hotel", "city": "Bangalore", "state": "Karnataka", "tier": 1, "address": "Windsor Square, Golf Course Road, Bangalore", "phone": "+91-80-2226-9898", "email": "windsor.procurement@itchotels.in", "website": "www.itchotels.in", "rating": 4.7, "num_outlets": 4, "decision_maker_name": "Sanjay Menon", "decision_maker_role": "F&B Manager", "decision_maker_linkedin": "linkedin.com/in/sanjay-itcwindsor", "has_dessert_menu": True, "hotel_category": "5-star", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "500-800 kg"},
-        {"business_name": "Third Wave Coffee", "segment": "Cafe", "city": "Bangalore", "state": "Karnataka", "tier": 1, "address": "Indiranagar, Bangalore - 560038", "phone": "+91-80-4123-5678", "email": "procurement@thirdwavecoffee.in", "website": "www.thirdwavecoffee.in", "rating": 4.4, "num_outlets": 65, "decision_maker_name": "Sushant Goel", "decision_maker_role": "Co-founder", "decision_maker_linkedin": "linkedin.com/in/sushant-thirdwave", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "400-700 kg"},
+        {"business_name": "Third Wave Coffee", "segment": "Cafe", "city": "Bangalore", "state": "Karnataka", "tier": 1, "address": "Indiranagar, Bangalore", "phone": "+91-80-4123-5678", "email": "procurement@thirdwavecoffee.in", "website": "www.thirdwavecoffee.in", "rating": 4.4, "num_outlets": 65, "decision_maker_name": "Sushant Goel", "decision_maker_role": "Co-founder", "decision_maker_linkedin": "linkedin.com/in/sushant-thirdwave", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "400-700 kg"},
         {"business_name": "Barbeque Nation Bangalore", "segment": "Restaurant", "city": "Bangalore", "state": "Karnataka", "tier": 1, "address": "Residency Road, Bangalore", "phone": "+91-80-4000-1234", "email": "supply@barbequenation.com", "website": "www.barbequenation.com", "rating": 4.1, "num_outlets": 180, "decision_maker_name": "Kayum Dhanani", "decision_maker_role": "CEO", "decision_maker_linkedin": "linkedin.com/in/barbequenation-india", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "5000-8000 kg"},
         {"business_name": "MTR Foods Restaurant", "segment": "Restaurant", "city": "Bangalore", "state": "Karnataka", "tier": 1, "address": "Lalbagh Road, Bangalore", "phone": "+91-80-2222-0022", "email": "supply@mtrfoods.com", "website": "www.mtrfoods.com", "rating": 4.3, "num_outlets": 40, "decision_maker_name": "Sadananda Maiya", "decision_maker_role": "Procurement Head", "decision_maker_linkedin": "linkedin.com/in/mtr-procurement", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "800-1200 kg"},
-        {"business_name": "Taj Falaknuma Palace", "segment": "Hotel", "city": "Hyderabad", "state": "Telangana", "tier": 1, "address": "Engine Bowli, Falaknuma, Hyderabad", "phone": "+91-40-6629-8585", "email": "falaknuma@tajhotels.com", "website": "www.tajhotels.com", "rating": 4.9, "num_outlets": 1, "decision_maker_name": "Zahir Hussain", "decision_maker_role": "Procurement Head", "decision_maker_linkedin": "linkedin.com/in/taj-falaknuma-procurement", "has_dessert_menu": True, "hotel_category": "5-star", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "400-600 kg"},
-        {"business_name": "Paradise Restaurant Hyderabad", "segment": "Restaurant", "city": "Hyderabad", "state": "Telangana", "tier": 1, "address": "SD Road, Secunderabad, Hyderabad", "phone": "+91-40-2784-7000", "email": "orders@paradiserestaurant.in", "website": "www.paradiserestaurant.in", "rating": 4.4, "num_outlets": 25, "decision_maker_name": "Mohammed Mateen", "decision_maker_role": "Purchase Manager", "decision_maker_linkedin": "", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "600-1000 kg"},
+        {"business_name": "Taj Falaknuma Palace", "segment": "Hotel", "city": "Hyderabad", "state": "Telangana", "tier": 1, "address": "Falaknuma, Hyderabad", "phone": "+91-40-6629-8585", "email": "falaknuma@tajhotels.com", "website": "www.tajhotels.com", "rating": 4.9, "num_outlets": 1, "decision_maker_name": "Zahir Hussain", "decision_maker_role": "Procurement Head", "decision_maker_linkedin": "linkedin.com/in/taj-falaknuma-procurement", "has_dessert_menu": True, "hotel_category": "5-star", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "400-600 kg"},
+        {"business_name": "Paradise Restaurant Hyderabad", "segment": "Restaurant", "city": "Hyderabad", "state": "Telangana", "tier": 1, "address": "SD Road, Secunderabad", "phone": "+91-40-2784-7000", "email": "orders@paradiserestaurant.in", "website": "www.paradiserestaurant.in", "rating": 4.4, "num_outlets": 25, "decision_maker_name": "Mohammed Mateen", "decision_maker_role": "Purchase Manager", "decision_maker_linkedin": "", "has_dessert_menu": True, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "600-1000 kg"},
         {"business_name": "ITC Grand Chola Chennai", "segment": "Hotel", "city": "Chennai", "state": "Tamil Nadu", "tier": 1, "address": "63 Mount Road, Guindy, Chennai", "phone": "+91-44-2220-0000", "email": "grandchola.procurement@itchotels.in", "website": "www.itchotels.in", "rating": 4.8, "num_outlets": 3, "decision_maker_name": "Karthik Rajan", "decision_maker_role": "F&B Procurement Director", "decision_maker_linkedin": "linkedin.com/in/karthik-itcchola", "has_dessert_menu": True, "hotel_category": "5-star", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "600-900 kg"},
         {"business_name": "JW Marriott Pune", "segment": "Hotel", "city": "Pune", "state": "Maharashtra", "tier": 1, "address": "Senapati Bapat Road, Pune", "phone": "+91-20-6683-3333", "email": "procurement@marriottpune.com", "website": "www.marriott.com", "rating": 4.6, "num_outlets": 2, "decision_maker_name": "Rohan Desai", "decision_maker_role": "Purchase Manager", "decision_maker_linkedin": "linkedin.com/in/jwmarriott-pune", "has_dessert_menu": True, "hotel_category": "5-star", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "500-700 kg"},
         {"business_name": "Rebel Foods Pune", "segment": "CloudKitchen", "city": "Pune", "state": "Maharashtra", "tier": 1, "address": "Baner, Pune", "phone": "+91-20-6720-1234", "email": "supply@rebelfoods.com", "website": "www.rebelfoods.com", "rating": 3.9, "num_outlets": 120, "decision_maker_name": "Jaydeep Barman", "decision_maker_role": "Co-founder", "decision_maker_linkedin": "linkedin.com/in/jaydeep-rebelfoods", "has_dessert_menu": False, "hotel_category": "", "is_chain": True, "source": "mock_data", "monthly_volume_estimate": "1000-2000 kg"},
@@ -635,29 +746,24 @@ async def seed_mock_data():
 
     statuses = ["new", "new", "new", "new", "contacted", "contacted", "qualified", "converted", "lost"]
     created = 0
-    for i, lead_data in enumerate(mock_leads):
-        score, priority, reasoning = calculate_lead_score(lead_data)
-        status = statuses[i % len(statuses)]
+    for i, data in enumerate(mock_leads):
+        score, priority, reasoning = calculate_lead_score(data)
         days_ago = random.randint(0, 45)
         ts = datetime.now(timezone.utc) - timedelta(days=days_ago)
-        doc = {
-            "id": str(uuid.uuid4()),
-            **lead_data,
-            "ai_score": score,
-            "ai_reasoning": reasoning,
-            "priority": priority,
-            "status": status,
-            "created_at": ts.isoformat(),
-            "updated_at": ts.isoformat()
-        }
-        await db.leads.insert_one(doc)
+        obj = Lead(
+            id=str(uuid.uuid4()), **data,
+            ai_score=score, ai_reasoning=reasoning, priority=priority,
+            status=statuses[i % len(statuses)],
+            created_at=ts, updated_at=ts
+        )
+        db.add(obj)
         created += 1
 
-    return {"message": f"Seeded {created} HORECA leads", "count": created}
+    await db.commit()
+    return {"message": f"Seeded {created} HORECA leads into PostgreSQL", "count": created}
 
 
 app.include_router(api_router)
-
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -665,8 +771,3 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()

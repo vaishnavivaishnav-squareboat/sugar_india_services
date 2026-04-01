@@ -122,7 +122,7 @@ function DiscoverTab() {
           </button>
         </div>
         <p className="text-xs text-[#5C736A] mt-3 flex items-center gap-1">
-          Simulates Google Maps + Zomato discovery for {segment}s in {city}
+          AI-powered lead discovery for {segment}s in {city} — save selected leads to your database
         </p>
       </div>
 
@@ -156,6 +156,16 @@ function DiscoverTab() {
                       <span className="px-2 py-0.5 rounded text-xs font-medium text-white" style={{ backgroundColor: segColor(lead.segment) }}>
                         {lead.segment}
                       </span>
+                      {lead.source === "google_maps" && (
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                          Google Maps
+                        </span>
+                      )}
+                      {(lead.source === "swiggy_simulation" || lead.source === "ai_generated") && (
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-orange-50 text-orange-600 border border-orange-200">
+                          AI Generated
+                        </span>
+                      )}
                       {lead.hotel_category && (
                         <span className="px-2 py-0.5 rounded text-xs bg-[#EDF0EA] text-[#143628]">{lead.hotel_category}</span>
                       )}
