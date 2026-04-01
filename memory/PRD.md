@@ -1,99 +1,122 @@
-# PRD: Dhampur Green HORECA Lead Intelligence Tool
+# Dhampur Green HORECA Lead Intelligence — PRD
 
-## Overview
-An AI-powered internal B2B sales tool for Dhampur Green (premium sugar/sweetener brand) that identifies, qualifies, scores, and enables outreach to HORECA (Hotels, Restaurants, Cafés) buyers across India.
+## Original Problem Statement
+Build an AI tool that generates qualified HORECA leads (Hotels, Restaurants, Cafés) for Dhampur Green. The system needs to identify buyers, filter them based on buying potential, enrich contact data, score/prioritize them, and automate outreach.
 
-## Problem Statement
-Dhampur Green's sales team needs a systematic way to:
-1. Discover HORECA businesses that consume sugar/jaggery at scale
-2. Qualify and score them by buying potential
-3. Enrich contact data for decision makers
-4. Generate personalized AI sales emails
-5. Track lead pipeline status
+## Product Requirements
+- Search sources: Google Maps, Zomato, LinkedIn
+- Target segments: Premium restaurants, Cafe chains, 3-5 star hotels, cloud kitchens
+- AI Qualification: GPT-based filtering/scoring (consumption prediction, menu analysis)
+- Contact Enrichment: Fetching emails and phone numbers
+- Automated Outreach: Generating personalized sales emails
+
+## User Choices
+- Database: PostgreSQL (migrated from MongoDB)
+- Google Maps API: Key provided (AIzaSyCTezHN6pNhF7oE6uHyJisG5dxZh7BngAY) — billing not enabled on GCP project, falls back to AI simulation
+- Zomato: Skip for now, use AI-generated simulation instead
+- LLM: OpenAI gpt-5.2 via Emergent LLM Key
+
+## Tech Stack
+- Frontend: React, TailwindCSS, Shadcn UI, Recharts
+- Backend: FastAPI, PostgreSQL (asyncpg + SQLAlchemy async)
+- AI: OpenAI GPT-5.2 via Emergent LLM Key (sk-emergent-dB4291cA8D13c5641F)
+- Design: Forest green (#143628) + terracotta (#B85C38) palette
 
 ## Architecture
+```
+/app/
+├── backend/
+│   ├── .env (MONGO_URL, DB_NAME, DATABASE_URL, EMERGENT_LLM_KEY, GOOGLE_MAPS_API_KEY, CORS_ORIGINS)
+│   ├── requirements.txt
+│   ├── server.py (FastAPI main router - all routes)
+│   ├── database.py (PostgreSQL SQLAlchemy async connection)
+│   └── models.py (SQLAlchemy ORM models: Lead, OutreachEmail)
+├── frontend/
+│   ├── .env (REACT_APP_BACKEND_URL)
+│   ├── package.json
+│   └── src/
+│       ├── App.js & App.css
+│       ├── components/ (Sidebar, Layout, ui/)
+│       └── pages/ (Dashboard, LeadDiscovery, LeadDatabase, LeadDetail, OutreachCenter)
+```
 
-### Backend (FastAPI + MongoDB)
-- `server.py` — All API routes, scoring engine, AI integration
-- DB: `dhampur_horeca` (MongoDB)
-- AI: OpenAI GPT-5.2 via emergentintegrations + EMERGENT_LLM_KEY
-- Port: 8001
+## DB Schema
+- **Lead**: id, business_name, segment, city, state, tier, address, phone, email, website, rating, num_outlets, decision_maker_name, decision_maker_role, decision_maker_linkedin, has_dessert_menu, hotel_category, is_chain, ai_score, ai_reasoning, priority, status, source, monthly_volume_estimate, created_at, updated_at
+- **OutreachEmail**: id, lead_id, lead_name, lead_city, lead_segment, subject, body, status, generated_at, sent_at
 
-### Frontend (React + Tailwind + shadcn)
-- `App.js` — React Router v7 routing
-- `pages/Dashboard.jsx` — KPI cards + recharts bar/donut charts
-- `pages/LeadDiscovery.jsx` — 3-tab discovery (API/CSV/Manual)
-- `pages/LeadDatabase.jsx` — Filterable sortable leads table
-- `pages/LeadDetail.jsx` — Bento grid, AI score gauge, email gen
-- `pages/OutreachCenter.jsx` — Email generation + history center
-- `components/Sidebar.jsx` — Dark green fixed navigation
+## Key API Endpoints
+- GET /api/dashboard/stats
+- GET /api/leads (with filters: city, segment, priority, status, min_score, search)
+- POST /api/leads (manual create)
+- POST /api/leads/discover (AI-powered discovery: Google Maps + simulation)
+- POST /api/leads/bulk-create
+- POST /api/leads/upload-csv
+- GET /api/leads/csv-template
+- GET /api/leads/{id}
+- PUT /api/leads/{id}/status
+- DELETE /api/leads/{id}
+- POST /api/leads/{id}/qualify-ai (GPT AI qualification)
+- POST /api/leads/{id}/generate-email (GPT email generation)
+- GET /api/outreach/emails
+- GET /api/outreach/{lead_id}/emails
+- PUT /api/outreach/{email_id}/mark-sent
+- POST /api/seed-mock-data
 
-### Design
-- Theme: Earthy/Organic — Primary #143628 (forest green), Accent #B85C38 (jaggery/terracotta)
-- Fonts: Plus Jakarta Sans (headings), Figtree (body), JetBrains Mono (email editor)
-- Light background: #F8F9F6
+## What's Been Implemented
 
-## User Personas
-- **Arjun Mehta** — Regional Sales Manager (primary user)
-- **Sales Team** — Field reps who use lead database and send emails
+### Session 1 (Initial Build)
+- React frontend with 5 pages: Dashboard, LeadDiscovery, LeadDatabase, LeadDetail, OutreachCenter
+- FastAPI backend with MongoDB
+- 100% E2E tests passing on MongoDB version
+- Deployment readiness check passed
 
-## Core Requirements (Static)
-1. HORECA lead discovery (simulated API + CSV upload + manual)
-2. Rule-based + AI lead scoring (0-100)
-3. Priority tiers: High (≥70), Medium (40-69), Low (<40)
-4. AI lead qualification with GPT-5.2 (sugar use cases, volume estimate)
-5. AI-personalized email generation per lead
-6. Lead status pipeline tracking (new → contacted → qualified → converted/lost)
-7. Dashboard with KPIs and charts
-8. Pan-India coverage (Tier 1 + Tier 2 cities)
+### Session 2 (PostgreSQL Migration + Enhancement) — Feb 2026
+- Migrated from MongoDB to PostgreSQL (local postgres, asyncpg, SQLAlchemy async)
+- Fixed PostgreSQL auth error (set postgres user password in .env)
+- Google Maps API integrated (legacy Places API attempted, falls back to AI simulation due to billing not enabled)
+- Enhanced lead discovery simulation: 8 varied results per search across 8 segment types (up from 2-3)
+- Added monthly volume estimates to simulated leads
+- Updated source badge from "Swiggy" to "AI Generated"
+- 30 realistic mock HORECA leads seeded across major Indian cities
+- AI Qualification (GPT-5.2) via Emergent LLM Key — live on Lead Detail page
+- AI Email Generation (GPT-5.2) — live on Lead Detail + Outreach Center
+- Backend tests: 16/16 passing
+- Frontend tests: 100% all flows working
 
-## Scoring Algorithm
+## Scoring Engine
 - 5-star hotel: +30, 4-star: +20, 3-star: +10
-- Bakery: +25, Mithai: +22, IceCream: +20, Cafe: +20
-- CloudKitchen/Catering: +18, Restaurant: +15, Hotel: +12
-- Chain: +15, 10+ outlets: +15, 3+ outlets: +10
-- Rating ≥4.5: +10, ≥4.0: +7
-- Tier 1 city: +10, Tier 2: +5
-- Has dessert menu: +15
-- Decision maker on LinkedIn: +10
+- Segment scores: Bakery +25, Mithai +22, IceCream +20, Cafe +20, CloudKitchen/Catering +18, Restaurant +15, Hotel +12
+- Chain: +15, Outlets 10+: +15, Outlets 3+: +10
+- Rating 4.5+: +10, 4.0+: +7
+- Metro city: +10, Tier 2: +5
+- Dessert menu: +15, LinkedIn decision maker: +10
+- High priority ≥70, Medium ≥40, Low <40
 
-## What's Been Implemented (Date: Feb 2026)
-- [x] Full backend API (FastAPI) with 15+ endpoints
-- [x] 30 realistic seeded mock HORECA leads across 12 Indian cities
-- [x] Lead CRUD (create, read, update status, delete)
-- [x] CSV upload & template download
-- [x] Simulated API discovery (Google Maps/Zomato mock)
-- [x] Bulk lead creation
-- [x] AI lead qualification (GPT-5.2)
-- [x] AI email generation (GPT-5.2)
-- [x] Dashboard with KPI cards + recharts charts
-- [x] Lead Database with full filtering & sorting
-- [x] Lead Detail page with bento grid layout
-- [x] Outreach Center with email history
-- [x] Design: earthy green brand theme applied
+## Prioritized Backlog
 
-## Mocked/Simulated
-- Lead discovery API (/api/leads/discover) returns **simulated** results (not real Google Maps/Zomato)
-- Real API integrations planned for Phase 2
+### P0 — Critical
+- None (all P0 items resolved)
 
-## Backlog / Next Tasks
+### P1 — High Priority
+- Contact Enrichment: Fetch verified emails/phone numbers for discovered leads
+- LinkedIn decision maker enrichment (profile scraping or manual)
 
-### P0 (Must-have next)
-- [ ] Real Google Maps API integration for lead discovery
-- [ ] Real Zomato/Swiggy API integration
-- [ ] Export leads to CSV/Excel
+### P2 — Medium Priority
+- Consumption Prediction Model (estimate monthly sugar kg based on segment/outlets/rating)
+- Smart Territory Mapping (cluster leads by city on map view)
+- Competitor Detection (scan menus for organic sugar, brown sugar competitors)
+- Bulk AI Qualification (qualify all leads in DB at once)
 
-### P1 (Important)
-- [ ] LinkedIn scraping for decision maker enrichment
-- [ ] Hunter.io/Apollo integration for email verification
-- [ ] WhatsApp outreach draft generation
-- [ ] Territory/region assignment to sales reps
+### P3 — Future/Backlog
+- Real Google Maps data (requires user to enable billing + Places API on GCP)
+- Zomato scraping integration
+- LinkedIn API integration
+- Email sending integration (SMTP/SendGrid)
+- WhatsApp/SMS outreach templates
+- Lead scoring v2 with more signals
+- Export leads to CRM (Salesforce/HubSpot)
 
-### P2 (Nice to have)
-- [ ] Consumption prediction model (hotel size × menu × reviews)
-- [ ] Competitor detection (organic/imported sugar on menu)
-- [ ] Region-wise map visualization (city clustering)
-- [ ] Email sequence automation (drip campaigns)
-- [ ] CRM push (Zoho/Salesforce integration)
-- [ ] Duplicate lead detection
-- [ ] Force re-seed option for fresh data
+## Test Infrastructure
+- Backend tests: /app/backend/tests/test_horeca_leads.py
+- Test reports: /app/test_reports/iteration_*.json
+- No authentication required for any endpoint
