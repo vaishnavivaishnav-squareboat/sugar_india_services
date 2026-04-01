@@ -3,7 +3,7 @@ import axios from "axios";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Phone, Mail, Globe, MapPin, Star, Linkedin, Cpu, Zap, Copy, Check, RefreshCw } from "lucide-react";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = `${import.meta.env.VITE_BACKEND_URL}/api`;
 
 const segColor = (s) => ({
   Hotel: "#143628", Restaurant: "#3D6B56", Cafe: "#8FA39A",

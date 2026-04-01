@@ -3,7 +3,7 @@ import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import { Search, Filter, ChevronUp, ChevronDown, MapPin, Star, Trash2, ExternalLink } from "lucide-react";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = `${import.meta.env.VITE_BACKEND_URL}/api`;
 
 const SEGMENTS = ["", "Hotel", "Restaurant", "Cafe", "Bakery", "CloudKitchen", "Catering", "Mithai", "IceCream"];
 const PRIORITIES = ["", "High", "Medium", "Low"];
