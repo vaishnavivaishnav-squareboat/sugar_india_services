@@ -5,7 +5,9 @@ import { Search, Upload, PlusCircle, CheckSquare, Square, ArrowRight, ChevronDow
 
 const API = `${import.meta.env.VITE_BACKEND_URL}/api`;
 
-const SEGMENTS = ["Hotel", "Restaurant", "Cafe", "Bakery", "CloudKitchen", "Catering", "Mithai", "IceCream"];
+const SEGMENTS = ["Hotel", "Restaurant", "Cafe", 
+  // "Bakery", "CloudKitchen", "Catering", "Mithai", "IceCream"
+];
 const CITIES = ["Mumbai", "Delhi", "Bangalore", "Hyderabad", "Chennai", "Kolkata", "Pune", "Ahmedabad",
   "Jaipur", "Lucknow", "Surat", "Chandigarh", "Nagpur", "Indore", "Bhopal", "Visakhapatnam", "Coimbatore"];
 const STATES = {

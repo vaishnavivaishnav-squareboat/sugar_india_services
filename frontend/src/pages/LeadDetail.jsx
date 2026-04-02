@@ -7,8 +7,8 @@ const API = `${import.meta.env.VITE_BACKEND_URL}/api`;
 
 const segColor = (s) => ({
   Hotel: "#143628", Restaurant: "#3D6B56", Cafe: "#8FA39A",
-  Bakery: "#B85C38", CloudKitchen: "#D4956A", Catering: "#6B5E44",
-  Mithai: "#A0522D", IceCream: "#C4878A"
+  // Bakery: "#B85C38", CloudKitchen: "#D4956A", Catering: "#6B5E44",
+  // Mithai: "#A0522D", IceCream: "#C4878A"
 }[s] || "#5C736A");
 
 const STATUSES = ["new", "contacted", "qualified", "converted", "lost"];

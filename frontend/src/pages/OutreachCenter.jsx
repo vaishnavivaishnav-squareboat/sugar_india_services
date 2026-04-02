@@ -6,9 +6,11 @@ import { Zap, Copy, Check, Mail, Send, RefreshCw, MapPin, Search, ArrowUpRight }
 const API = `${import.meta.env.VITE_BACKEND_URL}/api`;
 
 const segColor = (s) => ({
-  Hotel: "#143628", Restaurant: "#3D6B56", Cafe: "#8FA39A",
-  Bakery: "#B85C38", CloudKitchen: "#D4956A", Catering: "#6B5E44",
-  Mithai: "#A0522D", IceCream: "#C4878A"
+  Hotel: "#143628", 
+  Restaurant: "#3D6B56", 
+  Cafe: "#8FA39A",
+  // Bakery: "#B85C38", CloudKitchen: "#D4956A", Catering: "#6B5E44",
+  // Mithai: "#A0522D", IceCream: "#C4878A"
 }[s] || "#5C736A");
 
 const priorityColor = (p) => p === "High" ? "#B85C38" : p === "Medium" ? "#143628" : "#5C736A";

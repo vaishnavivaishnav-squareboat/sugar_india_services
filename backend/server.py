@@ -111,8 +111,9 @@ def calculate_lead_score(data: dict):
     elif hotel_cat == '3-star': score += 10; reasons.append('3-star hotel (+10)')
 
     segment = data.get('segment', '')
-    seg_pts = {'Bakery': 25, 'Mithai': 22, 'IceCream': 20, 'Cafe': 20,
-               'CloudKitchen': 18, 'Catering': 18, 'Restaurant': 15, 'Hotel': 12}
+    seg_pts = {
+        # 'Bakery': 25, 'Mithai': 22, 'IceCream': 20, 'CloudKitchen': 18, 'Catering': 18,
+                 'Cafe': 20,'Restaurant': 15, 'Hotel': 12}
     if segment in seg_pts:
         pts = seg_pts[segment]; score += pts; reasons.append(f'{segment} segment (+{pts})')
 
@@ -207,22 +208,23 @@ class DiscoverRequest(BaseModel):
     state: str = ""
 
 
-# ─── GOOGLE MAPS INTEGRATION ──────────────────────────────────────────────────
+# ─── NOMINATIM (OpenStreetMap) INTEGRATION ───────────────────────────────────
 
 HOTEL_LUXURY = ["taj ", "oberoi", "leela", "four seasons", "jw marriott", "grand hyatt",
                 "ritz-carlton", "aman", "raffles", "st. regis", "the imperial", "trident"]
 HOTEL_UPSCALE = ["marriott", "hilton", "sheraton", "radisson", "novotel", "crowne plaza",
                  "holiday inn", "hyatt regency", "courtyard", "westin", "renaissance", "le meridien"]
 
+# Query strings sent to Nominatim — {city} and {state} are interpolated at runtime
 SEGMENT_QUERIES = {
-    "Hotel": "hotels in {city}, India",
-    "Restaurant": "premium restaurants in {city}, India",
-    "Cafe": "cafes coffee shops in {city}, India",
-    "Bakery": "bakeries patisserie cake shops in {city}, India",
-    "CloudKitchen": "cloud kitchen food delivery in {city}, India",
-    "Catering": "catering company services in {city}, India",
-    "Mithai": "mithai sweet shops confectionery in {city}, India",
-    "IceCream": "ice cream parlors gelato in {city}, India",
+    "Hotel":        "hotel {city} in {state} India",
+    "Restaurant":   "restaurant in {city} in {state} India",
+    "Cafe":         "cafe in {city} in {state} India",
+    # "Bakery":       "bakery shop in {city} in {state} India",
+    # "CloudKitchen": "cloud kitchen in {city} in {state} India",
+    # "Catering":     "catering services in {city} in {state} India",
+    # "Mithai":       "sweet shop mithai in {city} in {state} India",
+    # "IceCream":     "ice cream parlor in {city} in {state} India",
 }
 
 
@@ -233,30 +235,26 @@ def detect_hotel_category(name: str) -> str:
     return "3-star"
 
 
-def gmaps_place_to_lead(place: dict, segment: str, city: str, state: str) -> dict:
-    name = place.get("displayName", {}).get("text", "")
-    address = place.get("formattedAddress", "")
-    rating = float(place.get("rating", 0) or 0)
-    phone = place.get("internationalPhoneNumber", "")
-    website = place.get("websiteUri", "")
-    rating_count = int(place.get("userRatingCount", 0) or 0)
+def nominatim_place_to_lead(place: dict, segment: str, city: str, state: str) -> dict:
+    """Map a Nominatim OSM result to a lead dict."""
+    name = place.get("name", "").strip()
+    display_name = place.get("display_name", "")
     tier = 1 if city in METRO_CITIES else 2
-
     hotel_cat = detect_hotel_category(name) if segment == "Hotel" else ""
-    is_chain = rating_count > 500  # Likely chain if many reviews
 
     lead = {
         "business_name": name,
         "segment": segment,
         "city": city, "state": state, "tier": tier,
-        "address": address, "phone": phone, "email": "", "website": website,
-        "rating": rating,
-        "num_outlets": 5 if rating_count > 2000 else (3 if rating_count > 500 else 1),
+        "address": display_name,
+        "phone": "", "email": "", "website": "",
+        "rating": 0.0,
+        "num_outlets": 1,
         "decision_maker_name": "", "decision_maker_role": "", "decision_maker_linkedin": "",
         "has_dessert_menu": segment in ["Bakery", "Mithai", "IceCream", "Hotel", "Cafe"],
         "hotel_category": hotel_cat,
-        "is_chain": is_chain,
-        "source": "google_maps",
+        "is_chain": False,
+        "source": "openstreetmap",
         "monthly_volume_estimate": ""
     }
     score, priority, reasoning = calculate_lead_score(lead)
@@ -264,24 +262,21 @@ def gmaps_place_to_lead(place: dict, segment: str, city: str, state: str) -> dic
     return lead
 
 
-async def search_google_maps(text_query: str, api_key: str) -> list:
-    url = "https://places.googleapis.com/v1/places:searchText"
-    headers = {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": api_key,
-        "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.rating,places.internationalPhoneNumber,places.websiteUri,places.types,places.userRatingCount,places.businessStatus"
-    }
-    body = {"textQuery": text_query, "pageSize": 10, "languageCode": "en"}
+async def search_nominatim(query: str) -> list:
+    """Call the Nominatim OpenStreetMap search API (free, no API key required)."""
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {"q": query, "format": "json", "limit": 10, "addressdetails": 0}
+    # Nominatim requires a descriptive User-Agent per usage policy
+    headers = {"User-Agent": "DhampurGreen-HORECA-LeadTool/1.0 (internal B2B sales tool)"}
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            resp = await client.post(url, headers=headers, json=body)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params=params, headers=headers)
             if resp.status_code == 200:
-                return resp.json().get("places", [])
-            logger.error(f"Google Maps API {resp.status_code}: {resp.text[:200]}")
+                return resp.json()
+            logger.error(f"Nominatim API {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        logger.error(f"Google Maps request failed: {e}")
+        logger.error(f"Nominatim request failed: {e}")
     return []
-
 
 # ─── LEAD SIMULATION ENGINE ───────────────────────────────────────────────────
 
@@ -308,16 +303,16 @@ SEGMENT_TEMPLATES = {
         {"sfx": "Waffle & Crepe Cafe", "rating": 4.5, "outlets": 6, "has_dessert": True, "is_chain": True, "vol": "120-200 kg"},
         {"sfx": "Cold Brew Coffee Studio", "rating": 4.4, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "60-100 kg"},
     ],
-    "Bakery": [
-        {"sfx": "Artisan Bakery & Patisserie", "rating": 4.5, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
-        {"sfx": "Cake & Confectionery Shop", "rating": 4.3, "outlets": 12, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
-        {"sfx": "French Bakery & Boulangerie", "rating": 4.7, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "250-450 kg"},
-        {"sfx": "Wedding Cake Studio", "rating": 4.6, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
-        {"sfx": "Sourdough & Bread House", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "300-550 kg"},
-        {"sfx": "Mithai & Pastry Shop", "rating": 4.2, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "600-1000 kg"},
-        {"sfx": "Cupcake & Macaron Boutique", "rating": 4.6, "outlets": 5, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
-        {"sfx": "Industrial Bread Factory", "rating": 4.0, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "1000-2000 kg"},
-    ],
+    # "Bakery": [
+    #     {"sfx": "Artisan Bakery & Patisserie", "rating": 4.5, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
+    #     {"sfx": "Cake & Confectionery Shop", "rating": 4.3, "outlets": 12, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
+    #     {"sfx": "French Bakery & Boulangerie", "rating": 4.7, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "250-450 kg"},
+    #     {"sfx": "Wedding Cake Studio", "rating": 4.6, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
+    #     {"sfx": "Sourdough & Bread House", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "300-550 kg"},
+    #     {"sfx": "Mithai & Pastry Shop", "rating": 4.2, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "600-1000 kg"},
+    #     {"sfx": "Cupcake & Macaron Boutique", "rating": 4.6, "outlets": 5, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
+    #     {"sfx": "Industrial Bread Factory", "rating": 4.0, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "1000-2000 kg"},
+    # ],
     "Hotel": [
         {"sfx": "Business Hotel", "rating": 4.2, "outlets": 1, "has_dessert": True, "is_chain": False, "hotel_cat": "3-star", "vol": "100-200 kg"},
         {"sfx": "Boutique Luxury Hotel", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "hotel_cat": "4-star", "vol": "250-450 kg"},
@@ -328,41 +323,41 @@ SEGMENT_TEMPLATES = {
         {"sfx": "Convention & Wedding Hotel", "rating": 4.3, "outlets": 4, "has_dessert": True, "is_chain": False, "hotel_cat": "4-star", "vol": "500-900 kg"},
         {"sfx": "Taj Partner Hotel", "rating": 4.6, "outlets": 2, "has_dessert": True, "is_chain": True, "hotel_cat": "5-star", "vol": "550-950 kg"},
     ],
-    "CloudKitchen": [
-        {"sfx": "Cloud Eats Kitchen", "rating": 4.0, "outlets": 15, "has_dessert": False, "is_chain": True, "vol": "300-500 kg"},
-        {"sfx": "Dark Kitchen Hub", "rating": 3.9, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
-        {"sfx": "Multi-Brand Food Factory", "rating": 4.1, "outlets": 25, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
-        {"sfx": "Healthy Meal Prep Kitchen", "rating": 4.3, "outlets": 6, "has_dessert": False, "is_chain": True, "vol": "100-200 kg"},
-        {"sfx": "Dessert Delivery Kitchen", "rating": 4.2, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "250-450 kg"},
-        {"sfx": "Virtual Biryani House", "rating": 4.0, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
-        {"sfx": "Tiffin & Meal Box Kitchen", "rating": 3.8, "outlets": 5, "has_dessert": True, "is_chain": False, "vol": "150-280 kg"},
-    ],
-    "Catering": [
-        {"sfx": "Events & Catering Co", "rating": 4.2, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
-        {"sfx": "Corporate Caterers", "rating": 4.0, "outlets": 3, "has_dessert": True, "is_chain": True, "vol": "300-600 kg"},
-        {"sfx": "Wedding & Social Caterers", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "500-1000 kg"},
-        {"sfx": "Industrial & Hospital Catering", "rating": 3.9, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "800-1500 kg"},
-        {"sfx": "School & College Canteen Mgmt", "rating": 4.0, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "400-800 kg"},
-        {"sfx": "Outdoor Event Specialists", "rating": 4.3, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "600-1200 kg"},
-    ],
-    "Mithai": [
-        {"sfx": "Traditional Sweets & Namkeen", "rating": 4.3, "outlets": 6, "has_dessert": True, "is_chain": True, "vol": "600-1000 kg"},
-        {"sfx": "Mithai Bhandar", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
-        {"sfx": "Premium Sweets & Gift Shop", "rating": 4.5, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "800-1500 kg"},
-        {"sfx": "Kaju Katli & Barfi House", "rating": 4.3, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "300-600 kg"},
-        {"sfx": "Halwai & Sweet Maker", "rating": 4.1, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
-        {"sfx": "Festive Sweets Emporium", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
-        {"sfx": "Sugar-Free & Diet Sweets", "rating": 4.2, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
-    ],
-    "IceCream": [
-        {"sfx": "Artisan Creamery & Scoops", "rating": 4.5, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
-        {"sfx": "Artisan Gelato & Sorbet", "rating": 4.6, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
-        {"sfx": "Kulfi & Falooda Parlour", "rating": 4.2, "outlets": 5, "has_dessert": True, "is_chain": True, "vol": "200-400 kg"},
-        {"sfx": "Shake & Sundae Bar", "rating": 4.4, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "300-600 kg"},
-        {"sfx": "Premium Frozen Dessert Shop", "rating": 4.5, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "350-650 kg"},
-        {"sfx": "Natural Fruit Ice Cream", "rating": 4.3, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
-        {"sfx": "Waffle & Ice Cream Studio", "rating": 4.6, "outlets": 6, "has_dessert": True, "is_chain": False, "vol": "250-450 kg"},
-    ],
+    # "CloudKitchen": [
+    #     {"sfx": "Cloud Eats Kitchen", "rating": 4.0, "outlets": 15, "has_dessert": False, "is_chain": True, "vol": "300-500 kg"},
+    #     {"sfx": "Dark Kitchen Hub", "rating": 3.9, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
+    #     {"sfx": "Multi-Brand Food Factory", "rating": 4.1, "outlets": 25, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
+    #     {"sfx": "Healthy Meal Prep Kitchen", "rating": 4.3, "outlets": 6, "has_dessert": False, "is_chain": True, "vol": "100-200 kg"},
+    #     {"sfx": "Dessert Delivery Kitchen", "rating": 4.2, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "250-450 kg"},
+    #     {"sfx": "Virtual Biryani House", "rating": 4.0, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
+    #     {"sfx": "Tiffin & Meal Box Kitchen", "rating": 3.8, "outlets": 5, "has_dessert": True, "is_chain": False, "vol": "150-280 kg"},
+    # ],
+    # "Catering": [
+    #     {"sfx": "Events & Catering Co", "rating": 4.2, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
+    #     {"sfx": "Corporate Caterers", "rating": 4.0, "outlets": 3, "has_dessert": True, "is_chain": True, "vol": "300-600 kg"},
+    #     {"sfx": "Wedding & Social Caterers", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "500-1000 kg"},
+    #     {"sfx": "Industrial & Hospital Catering", "rating": 3.9, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "800-1500 kg"},
+    #     {"sfx": "School & College Canteen Mgmt", "rating": 4.0, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "400-800 kg"},
+    #     {"sfx": "Outdoor Event Specialists", "rating": 4.3, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "600-1200 kg"},
+    # ],
+    # "Mithai": [
+    #     {"sfx": "Traditional Sweets & Namkeen", "rating": 4.3, "outlets": 6, "has_dessert": True, "is_chain": True, "vol": "600-1000 kg"},
+    #     {"sfx": "Mithai Bhandar", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
+    #     {"sfx": "Premium Sweets & Gift Shop", "rating": 4.5, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "800-1500 kg"},
+    #     {"sfx": "Kaju Katli & Barfi House", "rating": 4.3, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "300-600 kg"},
+    #     {"sfx": "Halwai & Sweet Maker", "rating": 4.1, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
+    #     {"sfx": "Festive Sweets Emporium", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
+    #     {"sfx": "Sugar-Free & Diet Sweets", "rating": 4.2, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
+    # ],
+    # "IceCream": [
+    #     {"sfx": "Artisan Creamery & Scoops", "rating": 4.5, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
+    #     {"sfx": "Artisan Gelato & Sorbet", "rating": 4.6, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
+    #     {"sfx": "Kulfi & Falooda Parlour", "rating": 4.2, "outlets": 5, "has_dessert": True, "is_chain": True, "vol": "200-400 kg"},
+    #     {"sfx": "Shake & Sundae Bar", "rating": 4.4, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "300-600 kg"},
+    #     {"sfx": "Premium Frozen Dessert Shop", "rating": 4.5, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "350-650 kg"},
+    #     {"sfx": "Natural Fruit Ice Cream", "rating": 4.3, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
+    #     {"sfx": "Waffle & Ice Cream Studio", "rating": 4.6, "outlets": 6, "has_dessert": True, "is_chain": False, "vol": "250-450 kg"},
+    # ],
 }
 
 DM_NAMES = [
@@ -611,21 +606,37 @@ async def discover_leads(req: DiscoverRequest):
     state = req.state.strip()
     results = []
 
-    api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
-    if api_key:
-        query = SEGMENT_QUERIES.get(segment, f"{segment} in {city}, India").replace("{city}", city)
-        places = await search_google_maps(query, api_key)
-        for place in places:
-            status = place.get("businessStatus", "")
-            if status and status != "OPERATIONAL":
-                continue
-            lead = gmaps_place_to_lead(place, segment, city, state)
-            if lead.get("business_name"):
-                results.append(lead)
+    logger.info(f"[DISCOVER] Request — city={city!r}, segment={segment!r}, state={state!r}")
 
-    # Always supplement with AI-generated simulation
-    simulated = generate_lead_simulation(city, segment, state)
-    results.extend(simulated)
+    query_tmpl = SEGMENT_QUERIES.get(segment, "restaurant {city} {state} India")
+    query = query_tmpl.replace("{city}", city).replace("{state}", state)
+    logger.info(f"[DISCOVER] Nominatim query: {query!r}")
+
+    places = await search_nominatim(query)
+    logger.info(f"[DISCOVER] Nominatim returned {len(places)} place(s)")
+
+    for place in places:
+        name = place.get("name", "").strip()
+        if not name:
+            logger.debug(f"[DISCOVER] Skipping place with no name: {place.get('display_name', '')[:60]}")
+            continue
+        lead = nominatim_place_to_lead(place, segment, city, state)
+        logger.info(f"[DISCOVER] OSM lead: {lead['business_name']!r} (type={place.get('type','?')}) — score={lead['ai_score']}, priority={lead['priority']}")
+        results.append(lead)
+
+    logger.info(f"[DISCOVER] OSM leads added: {len(results)}")
+
+    # Only supplement with simulation if OSM returned at least one result
+    if results:
+        simulated = generate_lead_simulation(city, segment, state)
+        logger.info(f"[DISCOVER] Simulated leads generated: {len(simulated)}")
+        for s in simulated:
+            logger.debug(f"[DISCOVER] Simulated: {s['business_name']!r} — score={s['ai_score']}, priority={s['priority']}")
+        results.extend(simulated)
+        logger.info(f"[DISCOVER] Total leads returned: {len(results)} (OSM={len(results) - len(simulated)}, Simulated={len(simulated)})")
+    else:
+        logger.warning(f"[DISCOVER] Nominatim returned 0 usable places for city={city!r}, segment={segment!r} — skipping simulation")
+        logger.info("[DISCOVER] Total leads returned: 0")
 
     return results
 

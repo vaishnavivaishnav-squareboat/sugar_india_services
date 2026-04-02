@@ -5,14 +5,16 @@ import { Search, Filter, ChevronUp, ChevronDown, MapPin, Star, Trash2, ExternalL
 
 const API = `${import.meta.env.VITE_BACKEND_URL}/api`;
 
-const SEGMENTS = ["", "Hotel", "Restaurant", "Cafe", "Bakery", "CloudKitchen", "Catering", "Mithai", "IceCream"];
+const SEGMENTS = ["", "Hotel", "Restaurant", "Cafe", 
+  // "Bakery", "CloudKitchen", "Catering", "Mithai", "IceCream"
+];
 const PRIORITIES = ["", "High", "Medium", "Low"];
 const STATUSES = ["", "new", "contacted", "qualified", "converted", "lost"];
 
 const segColor = (s) => ({
   Hotel: "#143628", Restaurant: "#3D6B56", Cafe: "#8FA39A",
-  Bakery: "#B85C38", CloudKitchen: "#D4956A", Catering: "#6B5E44",
-  Mithai: "#A0522D", IceCream: "#C4878A"
+  // Bakery: "#B85C38", CloudKitchen: "#D4956A", Catering: "#6B5E44",
+  // Mithai: "#A0522D", IceCream: "#C4878A"
 }[s] || "#5C736A");
 
 const priorityBg = (p) => p === "High" ? "badge-high" : p === "Medium" ? "badge-medium" : "badge-low";
