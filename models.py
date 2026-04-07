@@ -123,6 +123,7 @@ class City(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     ulid = Column(String(26), unique=True, nullable=False, default=gen_ulid)
     name = Column(String(100), nullable=False, index=True)
+    state = Column(String(100), default="")
     country = Column(String(100), default="India")
     is_active = Column(Boolean, default=True)
     priority = Column(Integer, default=1)
@@ -135,6 +136,7 @@ class City(Base):
             "id": self.id,
             "ulid": self.ulid,
             "name": self.name,
+            "state": self.state or "",
             "country": self.country,
             "is_active": self.is_active,
             "priority": self.priority,
@@ -168,6 +170,37 @@ class PipelineRun(Base):
 
 
 # ─── CONTACTS TABLE ─────────────────────────────────────────────────────
+class Segment(Base):
+    __tablename__ = "segments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ulid = Column(String(26), unique=True, nullable=False, default=gen_ulid)
+    key = Column(String(50), nullable=False, unique=True, index=True)   # e.g. "Bakery"
+    label = Column(String(100), nullable=False)                          # e.g. "Bakery"
+    cluster = Column(String(100), default="")                            # e.g. "Bakery & Confectionery"
+    description = Column(String(500), default="")
+    color = Column(String(20), default="#5C736A")                        # hex colour used in UI
+    is_active = Column(Boolean, default=True)
+    priority = Column(Integer, default=1)
+    created_at = Column(DateTime(timezone=True), server_default=sa_func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=sa_func.now(), onupdate=sa_func.now())
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "ulid": self.ulid,
+            "key": self.key,
+            "label": self.label,
+            "cluster": self.cluster,
+            "description": self.description,
+            "color": self.color,
+            "is_active": self.is_active,
+            "priority": self.priority,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Contact(Base):
     __tablename__ = "contacts"
 

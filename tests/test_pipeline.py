@@ -71,8 +71,6 @@ import sys
 import logging
 from pathlib import Path
 
-from sqlalchemy import false
-
 # ── ensure project root is on sys.path ───────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -328,51 +326,47 @@ async def run_pipeline(city: str, stage: str, dry_run: bool):
         if stage == "2":
             # businesses = MOCK_BUSINESSES
             businesses = [{
-                "place_id": "ChIJVVcsPJg9DTkRKOXisrZv2O4",
-                "business_name": "Under The Neem",
-                "address": "Karma Lakelands, Sector 80, Gurugram, Haryana 122012",
-                "phone": "096252 91720",
-                "website": "https://karmachalets.co.in/under-the-neem",
-                "rating": 4.4,
-                "reviews_count": 2897,
-                "lat": 28.3616052,
-                "lng": 76.958631,
-                "segment": "Restaurant",
-                "city": "Gurgaon",
+                "place_id": "ChIJ____P9yEXjkRUYF5jt1WDIk",
+                "business_name": "Baker's Den",
+                "address": "7, Shivalik Plaza, IIM Rd, opposite AMA, Panjara Pol, Ambawadi, Ahmedabad, Gujarat 380015",
+                "phone": "076994 54545",
+                "website": "https://www.thebakersden.com/",
+                "description": "",
+                "rating": 4.7,
+                "reviews_count": 302,
+                "lat": 23.028003599999998,
+                "lng": 72.5423191,
+                "highlights": [],
+                "from_the_business": [],
+                "segment": "Bakery",
+                "city": "Ahmedabad",
                 "state": "",
                 "tier": 1,
                 "num_outlets": 1,
-                "is_chain": false,
+                "is_chain": False,
                 "source": "serpapi_google_maps"
-                }]
+            }]
         # businesses = await run_stage_2(businesses, dry_run)
         businesses = await run_stage_2([{
-            "place_id": "ChIJsYbKGf0YDTkRS0ol8yTZBwc",
-            "business_name": "Cafe G - Crowne Plaza Today Gurugram",
-            "address": "Sector 29, Opposite Signature Towers, Gurugram, Haryana 122009",
-            "phone": "088600 27121",
-            "website": "https://www.ihg.com/content/gb/en/deals/hotel-offers/dining-deals",
-            "description": "Unfussy international hotel cafe. Open from 6.30am until 1am, this relaxed hotel dining room dishes up inventive international menus.",
-            "rating": 4.6,
-            "reviews_count": 742,
-            "lat": 28.4680064,
-            "lng": 77.0593574,
-            "highlights": [
-                "Great beer selection",
-                "Great coffee",
-                "Great dessert",
-                "Great tea selection",
-                "Great wine list",
-                "Live music"
-            ],
-            "from_the_business": [],
-            "segment": "Restaurant",
-            "city": "Gurgaon",
-            "state": "",
-            "tier": 1,
-            "num_outlets": 1,
-            "is_chain": false,
-            "source": "serpapi_google_maps"
+                "place_id": "ChIJ____P9yEXjkRUYF5jt1WDIk",
+                "business_name": "Baker's Den",
+                "address": "7, Shivalik Plaza, IIM Rd, opposite AMA, Panjara Pol, Ambawadi, Ahmedabad, Gujarat 380015",
+                "phone": "076994 54545",
+                "website": "https://www.thebakersden.com/",
+                "description": "",
+                "rating": 4.7,
+                "reviews_count": 302,
+                "lat": 23.028003599999998,
+                "lng": 72.5423191,
+                "highlights": [],
+                "from_the_business": [],
+                "segment": "Bakery",
+                "city": "Ahmedabad",
+                "state": "",
+                "tier": 1,
+                "num_outlets": 1,
+                "is_chain": False,
+                "source": "serpapi_google_maps"
             }], dry_run)
         if stage == "2":
             return
@@ -396,7 +390,7 @@ async def run_pipeline(city: str, stage: str, dry_run: bool):
                 "state": "",
                 "tier": 1,
                 "num_outlets": 1,
-                "is_chain": false,
+                "is_chain": False,
                 "source": "serpapi_google_maps"
                 }]
             businesses = await run_stage_2(businesses, dry_run=True)
@@ -459,7 +453,7 @@ async def run_pipeline(city: str, stage: str, dry_run: bool):
                 "state": "",
                 "tier": 1,
                 "num_outlets": 1,
-                "is_chain": false,
+                "is_chain": False,
                 "source": "serpapi_google_maps"
                 }]
             businesses = await run_stage_2(businesses, dry_run=True)

@@ -44,33 +44,76 @@ SERP_API_KEY   = os.getenv("SERP_API_KEY", "")
 HUNTER_API_KEY = os.getenv("HUNTER_API_KEY", "")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY", "")
 
-# ─── CONSTANTS ────────────────────────────────────────────────────────────────
-# Dynamic query map: each segment gets multiple search phrases for better coverage.
-# {city} is interpolated at runtime from the active city record.
+
 HORECA_QUERY_MAP: dict[str, list[str]] = {
-    "Restaurant":    ["restaurants in {city}"
-                    #   , "dine in restaurant {city}", "fine dining {city}"
-                    ],
-    # "Cafe":          ["cafes in {city}", "coffee shops in {city}", "dessert cafe {city}"],
-    # "Bakery":        ["bakeries in {city}", "cake shop {city}", "patisserie {city}"],
-    # "Hotel":         ["hotels in {city}", "luxury hotels {city}", "resort {city}"],
-    # "Catering":      ["catering services in {city}", "event caterers {city}"],
-    # "Mithai":        ["sweet shop {city}", "mithai shop {city}", "halwai {city}"],
-    # "IceCream":      ["ice cream parlour {city}", "gelato {city}"],
-    # "CloudKitchen":  ["cloud kitchen {city}", "dark kitchen {city}"],
+    # ── A. Bakery & Confectionery ──────────────────────────────────────────
+    "Bakery":           ["bakeries in {city}", "cake shop {city}", "patisserie {city}"],
+    # # ── B. Dairy & Frozen ─────────────────────────────────────────────────
+    # "IceCream":         ["ice cream parlour {city}", "gelato shop {city}", "frozen dessert {city}"],
+    # # ── C. Beverage ───────────────────────────────────────────────────────
+    # "Beverage":         ["juice manufacturer {city}", "beverage company {city}", "syrup manufacturer {city}"],
+    # # ── D. HORECA ─────────────────────────────────────────────────────────
+    # "Restaurant":       ["restaurants in {city}", "fine dining {city}"],
+    # "Cafe":             ["cafes in {city}", "coffee shops {city}", "dessert cafe {city}"],
+    # "Hotel":            ["hotels in {city}", "luxury hotels {city}"],
+    # "Catering":         ["catering services {city}", "event caterers {city}"],
+    # "CloudKitchen":     ["cloud kitchen {city}", "dark kitchen {city}"],
+    # # ── E. Traditional Sweets ─────────────────────────────────────────────
+    # "Mithai":           ["sweet shop {city}", "mithai shop {city}", "halwai {city}"],
+    # # ── F. Food Processing ────────────────────────────────────────────────
+    # "FoodProcessing":   ["biscuit manufacturer {city}", "packaged food company {city}", "food processing unit {city}"],
+    # # ── G. Health / Organic / Jaggery ─────────────────────────────────────
+    # "Organic":          ["organic food brand {city}", "jaggery products {city}", "ayurvedic food company {city}"],
+    # # ── H. Fermentation (Brewery / Distillery) ────────────────────────────
+    # "Brewery":          ["brewery {city}", "distillery {city}", "craft beer {city}"],
+}
+
+# Full query map used when a specific segment_filter is requested (e.g. from discover endpoint).
+# HORECA_QUERY_MAP above controls which segments the weekly cron processes.
+_FULL_QUERY_MAP: dict[str, list[str]] = {
+    "Bakery":         ["bakeries in {city}", "cake shop {city}", "patisserie {city}"],
+    "IceCream":       ["ice cream parlour {city}", "gelato shop {city}", "frozen dessert {city}"],
+    "Beverage":       ["juice manufacturer {city}", "beverage company {city}", "syrup manufacturer {city}"],
+    "Restaurant":     ["restaurants in {city}", "fine dining {city}"],
+    "Cafe":           ["cafes in {city}", "coffee shops {city}", "dessert cafe {city}"],
+    "Hotel":          ["hotels in {city}", "luxury hotels {city}"],
+    "Catering":       ["catering services {city}", "event caterers {city}"],
+    "CloudKitchen":   ["cloud kitchen {city}", "dark kitchen {city}"],
+    "Mithai":         ["sweet shop {city}", "mithai shop {city}", "halwai {city}"],
+    "FoodProcessing": ["biscuit manufacturer {city}", "packaged food company {city}", "food processing unit {city}"],
+    "Organic":        ["organic food brand {city}", "jaggery products {city}", "ayurvedic food company {city}"],
+    "Brewery":        ["brewery {city}", "distillery {city}", "craft beer {city}"],
 }
 
 SEGMENT_WEIGHTS = {
-    "Bakery": 100, "Mithai": 100, "IceCream": 90,
-    "Cafe": 80, "Catering": 75, "CloudKitchen": 70,
-    "Restaurant": 60, 
-    "Hotel": 55,
+    # High-volume, daily consumers
+    "Mithai":           100,
+    "Bakery":           100,
+    "FoodProcessing":   95,
+    "IceCream":         90,
+    "Beverage":         88,
+    # Medium-volume
+    "Catering":         80,
+    "Cafe":             78,
+    "CloudKitchen":     72,
+    "Organic":          70,
+    "Brewery":          65,
+    # Lower per-unit but large collective volume
+    "Restaurant":       60,
+    "Hotel":            55,
 }
 
 ROLE_PRIORITY = [
-    "F&B Manager", "F&B Director", "Procurement Manager",
-    "Operations Manager", "Store Manager", "General Manager",
-    "Owner", "Founder",
+    # Procurement / Purchase — highest decision power
+    "Procurement Manager", "Purchase Manager", "Purchase Head",
+    "Supply Chain Manager", "Supply Chain Head",
+    # F&B / Production
+    "F&B Manager", "F&B Director", "Production Manager", "Plant Manager",
+    # Ops / General management
+    "Operations Manager", "Operations Director",
+    "Store Manager", "General Manager",
+    # Founders / Owners
+    "Owner", "Founder", "Co-Founder", "Director",
 ]
 
 
@@ -172,12 +215,18 @@ def _normalize_serp_result(place: dict, segment: str, city: str) -> dict:
     }
 
 
-async def extract_business_data(city: str, session: AsyncSession) -> list:
+async def extract_business_data(
+    city: str,
+    session: AsyncSession,
+    segment_filter: Optional[str] = None,
+) -> list:
     """
     Stage 1: Discover HORECA businesses via SerpAPI Google Maps engine.
 
-    - Iterates every segment in HORECA_QUERY_MAP
-    - Runs all query variants for each segment
+    - If segment_filter is provided: queries only that segment using _FULL_QUERY_MAP
+      (used by the on-demand /discover endpoint)
+    - If segment_filter is None: iterates every segment in HORECA_QUERY_MAP
+      (used by the weekly cron)
     - Paginates up to 3 pages (start=0, 20, 40) per query → up to 60 results
     - Deduplicates by place_id across all queries
     - Returns a list of normalised business dicts
@@ -188,17 +237,40 @@ async def extract_business_data(city: str, session: AsyncSession) -> list:
         logger.warning("[Extract] SERP_API_KEY not set – skipping extraction.")
         return []
 
+    # Choose query map based on whether a specific segment was requested
+    if segment_filter:
+        # Use curated queries if available, otherwise auto-generate generic ones
+        # so that admin-defined segments (not in _FULL_QUERY_MAP) still work.
+        curated = _FULL_QUERY_MAP.get(segment_filter)
+        if curated:
+            queries = curated
+            logger.info(f"[Extract] Segment filter '{segment_filter}': using {len(queries)} curated queries")
+        else:
+            # Fallback: derive reasonable search terms from the segment key
+            # e.g. "FarmToTable" → ["FarmToTable in {city}", "farm to table {city}"]
+            label = re.sub(r'([A-Z])', r' \1', segment_filter).strip()  # CamelCase → words
+            queries = [
+                f"{segment_filter} in {{city}}",
+                f"{label.lower()} {{city}}",
+            ]
+            logger.info(
+                f"[Extract] Segment filter '{segment_filter}' not in _FULL_QUERY_MAP – "
+                f"auto-generated {len(queries)} generic queries"
+            )
+        query_map = {segment_filter: queries}
+    else:
+        query_map = HORECA_QUERY_MAP
+        logger.info(f"[Extract] No segment filter — querying all {len(query_map)} segments from HORECA_QUERY_MAP")
+
     seen_ids: set  = set()
     results:  list = []
 
-    for segment, query_templates in HORECA_QUERY_MAP.items():
+    for segment, query_templates in query_map.items():
         for query_template in query_templates:
             query = query_template.format(city=city)
 
-            # for page_num in range(3):            # 3 pages × 20 results = 60 per query
-            for page_num in range(1):
-                # start = page_num * 20
-                start = 1
+            for page_num in range(3):            # 3 pages × 20 results = up to 60 per query
+                start = page_num * 20
                 places = await _serp_maps_page(query, start=start)
 
                 if not places:

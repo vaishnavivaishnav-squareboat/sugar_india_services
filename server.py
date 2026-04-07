@@ -1,9 +1,8 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import Response
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from sqlalchemy import select, func, or_, and_, update as sql_update, delete as sql_delete
-import os, logging, csv, io, json, uuid, random, httpx
+import os, logging, csv, io, json, uuid, random
 from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, mapped_column
@@ -12,11 +11,14 @@ from pathlib import Path
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
-# from emergentintegrations.llm.chat import LlmChat, UserMessage
-from google import genai
-from database import engine, get_db, Base
-from models import Lead, OutreachEmail, City
+import openpyxl
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from models import Lead, City, Segment
 from genai_helper import call_genai
+import pipeline_stages as ps
+from pipeline_stages import SERP_API_KEY as _SERP_API_KEY
 
 
 ROOT_DIR = Path(__file__).parent
@@ -30,7 +32,6 @@ AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=As
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-METRO_CITIES = ["Mumbai", "Delhi", "Bangalore", "Hyderabad", "Chennai", "Kolkata", "Pune", "Ahmedabad"]
 
 # ─── ORM MODELS ──────────────────────────────────────────────────────────────
 
@@ -121,8 +122,15 @@ def calculate_lead_score(data: dict):
 
     segment = data.get('segment', '')
     seg_pts = {
-        # 'Bakery': 25, 'Mithai': 22, 'IceCream': 20, 'CloudKitchen': 18, 'Catering': 18,
-                 'Cafe': 20,'Restaurant': 15, 'Hotel': 12}
+        # High-volume daily consumers
+        'Mithai': 30, 'Bakery': 28, 'FoodProcessing': 26,
+        'IceCream': 24, 'Beverage': 22,
+        # Medium-volume
+        'Catering': 20, 'Cafe': 20, 'Organic': 18,
+        'CloudKitchen': 18, 'Brewery': 16,
+        # Lower per-unit
+        'Restaurant': 15, 'Hotel': 12,
+    }
     if segment in seg_pts:
         pts = seg_pts[segment]; score += pts; reasons.append(f'{segment} segment (+{pts})')
 
@@ -219,6 +227,7 @@ class DiscoverRequest(BaseModel):
 
 class CityCreate(BaseModel):
     name: str
+    state: str = ""
     country: str = "India"
     priority: int = 1
 
@@ -227,213 +236,18 @@ class CityPriorityUpdate(BaseModel):
     priority: int
 
 
-# ─── NOMINATIM (OpenStreetMap) INTEGRATION ───────────────────────────────────
-
-HOTEL_LUXURY = ["taj ", "oberoi", "leela", "four seasons", "jw marriott", "grand hyatt",
-                "ritz-carlton", "aman", "raffles", "st. regis", "the imperial", "trident"]
-HOTEL_UPSCALE = ["marriott", "hilton", "sheraton", "radisson", "novotel", "crowne plaza",
-                 "holiday inn", "hyatt regency", "courtyard", "westin", "renaissance", "le meridien"]
-
-# Query strings sent to Nominatim — {city} and {state} are interpolated at runtime
-SEGMENT_QUERIES = {
-    "Hotel":        "hotel {city} in {state} India",
-    "Restaurant":   "restaurant in {city} in {state} India",
-    "Cafe":         "cafe in {city} in {state} India",
-    # "Bakery":       "bakery shop in {city} in {state} India",
-    # "CloudKitchen": "cloud kitchen in {city} in {state} India",
-    # "Catering":     "catering services in {city} in {state} India",
-    # "Mithai":       "sweet shop mithai in {city} in {state} India",
-    # "IceCream":     "ice cream parlor in {city} in {state} India",
-}
+class SegmentCreate(BaseModel):
+    key: str
+    label: str = ""
+    cluster: str = ""
+    description: str = ""
+    color: str = "#5C736A"
+    priority: int = 1
 
 
-def detect_hotel_category(name: str) -> str:
-    nl = name.lower()
-    if any(b in nl for b in HOTEL_LUXURY): return "5-star"
-    if any(b in nl for b in HOTEL_UPSCALE): return "4-star"
-    return "3-star"
+class SegmentPriorityUpdate(BaseModel):
+    priority: int
 
-
-def nominatim_place_to_lead(place: dict, segment: str, city: str, state: str) -> dict:
-    """Map a Nominatim OSM result to a lead dict."""
-    name = place.get("name", "").strip()
-    display_name = place.get("display_name", "")
-    tier = 1 if city in METRO_CITIES else 2
-    hotel_cat = detect_hotel_category(name) if segment == "Hotel" else ""
-
-    lead = {
-        "business_name": name,
-        "segment": segment,
-        "city": city, "state": state, "tier": tier,
-        "address": display_name,
-        "phone": "", "email": "", "website": "",
-        "rating": 0.0,
-        "num_outlets": 1,
-        "decision_maker_name": "", "decision_maker_role": "", "decision_maker_linkedin": "",
-        "has_dessert_menu": segment in ["Bakery", "Mithai", "IceCream", "Hotel", "Cafe"],
-        "hotel_category": hotel_cat,
-        "is_chain": False,
-        "source": "openstreetmap",
-        "monthly_volume_estimate": ""
-    }
-    score, priority, reasoning = calculate_lead_score(lead)
-    lead["ai_score"] = score; lead["ai_reasoning"] = reasoning; lead["priority"] = priority
-    return lead
-
-
-async def search_nominatim(query: str) -> list:
-    """Call the Nominatim OpenStreetMap search API (free, no API key required)."""
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": query, "format": "json", "limit": 10, "addressdetails": 0}
-    # Nominatim requires a descriptive User-Agent per usage policy
-    headers = {"User-Agent": "DhampurGreen-HORECA-LeadTool/1.0 (internal B2B sales tool)"}
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params, headers=headers)
-            if resp.status_code == 200:
-                return resp.json()
-            logger.error(f"Nominatim API {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        logger.error(f"Nominatim request failed: {e}")
-    return []
-
-# ─── LEAD SIMULATION ENGINE ───────────────────────────────────────────────────
-
-SEGMENT_TEMPLATES = {
-    "Restaurant": [
-        {"sfx": "Family Dhaba", "rating": 4.1, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "80-150 kg"},
-        {"sfx": "Multi-Cuisine Restaurant", "rating": 4.3, "outlets": 5, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
-        {"sfx": "Fine Dine Kitchen", "rating": 4.5, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
-        {"sfx": "Buffet & Banquet Hall", "rating": 4.0, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "300-500 kg"},
-        {"sfx": "North Indian Cuisine", "rating": 4.2, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "250-400 kg"},
-        {"sfx": "Pan-Asian Bistro", "rating": 4.4, "outlets": 4, "has_dessert": True, "is_chain": True, "vol": "150-280 kg"},
-        {"sfx": "Rooftop Restaurant", "rating": 4.6, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "120-220 kg"},
-        {"sfx": "Thali House", "rating": 4.1, "outlets": 6, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
-        {"sfx": "Coastal Seafood House", "rating": 4.3, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "100-180 kg"},
-        {"sfx": "Corporate Food Court", "rating": 3.9, "outlets": 12, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
-    ],
-    "Cafe": [
-        {"sfx": "Specialty Coffee House", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "100-200 kg"},
-        {"sfx": "Dessert & Brunch Cafe", "rating": 4.6, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "80-150 kg"},
-        {"sfx": "Artisan Coffee Roasters", "rating": 4.5, "outlets": 12, "has_dessert": True, "is_chain": True, "vol": "150-280 kg"},
-        {"sfx": "Book Cafe & Bistro", "rating": 4.3, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "40-80 kg"},
-        {"sfx": "Co-working Cafe", "rating": 4.0, "outlets": 5, "has_dessert": True, "is_chain": True, "vol": "100-180 kg"},
-        {"sfx": "Bubble Tea & Smoothie Bar", "rating": 4.2, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
-        {"sfx": "Waffle & Crepe Cafe", "rating": 4.5, "outlets": 6, "has_dessert": True, "is_chain": True, "vol": "120-200 kg"},
-        {"sfx": "Cold Brew Coffee Studio", "rating": 4.4, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "60-100 kg"},
-    ],
-    # "Bakery": [
-    #     {"sfx": "Artisan Bakery & Patisserie", "rating": 4.5, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
-    #     {"sfx": "Cake & Confectionery Shop", "rating": 4.3, "outlets": 12, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
-    #     {"sfx": "French Bakery & Boulangerie", "rating": 4.7, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "250-450 kg"},
-    #     {"sfx": "Wedding Cake Studio", "rating": 4.6, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
-    #     {"sfx": "Sourdough & Bread House", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "300-550 kg"},
-    #     {"sfx": "Mithai & Pastry Shop", "rating": 4.2, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "600-1000 kg"},
-    #     {"sfx": "Cupcake & Macaron Boutique", "rating": 4.6, "outlets": 5, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
-    #     {"sfx": "Industrial Bread Factory", "rating": 4.0, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "1000-2000 kg"},
-    # ],
-    "Hotel": [
-        {"sfx": "Business Hotel", "rating": 4.2, "outlets": 1, "has_dessert": True, "is_chain": False, "hotel_cat": "3-star", "vol": "100-200 kg"},
-        {"sfx": "Boutique Luxury Hotel", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "hotel_cat": "4-star", "vol": "250-450 kg"},
-        {"sfx": "Grand Heritage Hotel", "rating": 4.7, "outlets": 5, "has_dessert": True, "is_chain": True, "hotel_cat": "5-star", "vol": "600-1000 kg"},
-        {"sfx": "Airport Transit Hotel", "rating": 3.9, "outlets": 1, "has_dessert": True, "is_chain": True, "hotel_cat": "3-star", "vol": "80-150 kg"},
-        {"sfx": "Resort & Spa", "rating": 4.5, "outlets": 3, "has_dessert": True, "is_chain": False, "hotel_cat": "5-star", "vol": "400-700 kg"},
-        {"sfx": "Extended Stay Hotel", "rating": 4.1, "outlets": 2, "has_dessert": True, "is_chain": True, "hotel_cat": "3-star", "vol": "150-280 kg"},
-        {"sfx": "Convention & Wedding Hotel", "rating": 4.3, "outlets": 4, "has_dessert": True, "is_chain": False, "hotel_cat": "4-star", "vol": "500-900 kg"},
-        {"sfx": "Taj Partner Hotel", "rating": 4.6, "outlets": 2, "has_dessert": True, "is_chain": True, "hotel_cat": "5-star", "vol": "550-950 kg"},
-    ],
-    # "CloudKitchen": [
-    #     {"sfx": "Cloud Eats Kitchen", "rating": 4.0, "outlets": 15, "has_dessert": False, "is_chain": True, "vol": "300-500 kg"},
-    #     {"sfx": "Dark Kitchen Hub", "rating": 3.9, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "200-350 kg"},
-    #     {"sfx": "Multi-Brand Food Factory", "rating": 4.1, "outlets": 25, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
-    #     {"sfx": "Healthy Meal Prep Kitchen", "rating": 4.3, "outlets": 6, "has_dessert": False, "is_chain": True, "vol": "100-200 kg"},
-    #     {"sfx": "Dessert Delivery Kitchen", "rating": 4.2, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "250-450 kg"},
-    #     {"sfx": "Virtual Biryani House", "rating": 4.0, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
-    #     {"sfx": "Tiffin & Meal Box Kitchen", "rating": 3.8, "outlets": 5, "has_dessert": True, "is_chain": False, "vol": "150-280 kg"},
-    # ],
-    # "Catering": [
-    #     {"sfx": "Events & Catering Co", "rating": 4.2, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
-    #     {"sfx": "Corporate Caterers", "rating": 4.0, "outlets": 3, "has_dessert": True, "is_chain": True, "vol": "300-600 kg"},
-    #     {"sfx": "Wedding & Social Caterers", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "500-1000 kg"},
-    #     {"sfx": "Industrial & Hospital Catering", "rating": 3.9, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "800-1500 kg"},
-    #     {"sfx": "School & College Canteen Mgmt", "rating": 4.0, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "400-800 kg"},
-    #     {"sfx": "Outdoor Event Specialists", "rating": 4.3, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "600-1200 kg"},
-    # ],
-    # "Mithai": [
-    #     {"sfx": "Traditional Sweets & Namkeen", "rating": 4.3, "outlets": 6, "has_dessert": True, "is_chain": True, "vol": "600-1000 kg"},
-    #     {"sfx": "Mithai Bhandar", "rating": 4.4, "outlets": 2, "has_dessert": True, "is_chain": False, "vol": "200-400 kg"},
-    #     {"sfx": "Premium Sweets & Gift Shop", "rating": 4.5, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "800-1500 kg"},
-    #     {"sfx": "Kaju Katli & Barfi House", "rating": 4.3, "outlets": 4, "has_dessert": True, "is_chain": False, "vol": "300-600 kg"},
-    #     {"sfx": "Halwai & Sweet Maker", "rating": 4.1, "outlets": 1, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
-    #     {"sfx": "Festive Sweets Emporium", "rating": 4.4, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
-    #     {"sfx": "Sugar-Free & Diet Sweets", "rating": 4.2, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "100-200 kg"},
-    # ],
-    # "IceCream": [
-    #     {"sfx": "Artisan Creamery & Scoops", "rating": 4.5, "outlets": 10, "has_dessert": True, "is_chain": True, "vol": "400-700 kg"},
-    #     {"sfx": "Artisan Gelato & Sorbet", "rating": 4.6, "outlets": 3, "has_dessert": True, "is_chain": False, "vol": "150-300 kg"},
-    #     {"sfx": "Kulfi & Falooda Parlour", "rating": 4.2, "outlets": 5, "has_dessert": True, "is_chain": True, "vol": "200-400 kg"},
-    #     {"sfx": "Shake & Sundae Bar", "rating": 4.4, "outlets": 15, "has_dessert": True, "is_chain": True, "vol": "300-600 kg"},
-    #     {"sfx": "Premium Frozen Dessert Shop", "rating": 4.5, "outlets": 8, "has_dessert": True, "is_chain": True, "vol": "350-650 kg"},
-    #     {"sfx": "Natural Fruit Ice Cream", "rating": 4.3, "outlets": 20, "has_dessert": True, "is_chain": True, "vol": "500-900 kg"},
-    #     {"sfx": "Waffle & Ice Cream Studio", "rating": 4.6, "outlets": 6, "has_dessert": True, "is_chain": False, "vol": "250-450 kg"},
-    # ],
-}
-
-DM_NAMES = [
-    "Rajesh Kumar", "Priya Sharma", "Amit Singh", "Sunita Verma", "Vikram Nair",
-    "Deepa Iyer", "Sanjay Mehta", "Rohit Gupta", "Anita Patel", "Manish Tiwari",
-    "Kavita Reddy", "Suresh Menon", "Pooja Agarwal", "Arjun Pillai", "Neha Joshi"
-]
-DM_ROLES = [
-    "Procurement Manager", "F&B Director", "Purchase Head", "Owner",
-    "Operations Manager", "Supply Chain Head", "F&B Manager", "Founder & CEO", "Director - Procurement"
-]
-ROAD_NAMES = ["MG Road", "Main Street", "Park Road", "Station Road", "Brigade Road", "Link Road",
-              "Commercial Street", "Anna Salai", "Nehru Place", "Connaught Place", "Bandra-Kurla Complex"]
-PREFIXES = ["Golden", "Royal", "Classic", "Heritage", "Prime", "Urban", "The", "New",
-            "Elite", "Grand", "Imperial", "Prestige", "Sterling", "Vivanta", "Spice"]
-
-
-def generate_lead_simulation(city: str, segment: str, state: str) -> list:
-    tier = 1 if city in METRO_CITIES else 2
-    templates = SEGMENT_TEMPLATES.get(segment, SEGMENT_TEMPLATES["Restaurant"])
-    # Shuffle and take up to 8 templates for variety
-    shuffled = templates[:]
-    random.shuffle(shuffled)
-    selected = shuffled[:min(8, len(shuffled))]
-    results = []
-    used_names = set()
-    for tmpl in selected:
-        pfx = random.choice(PREFIXES)
-        name = f"{pfx} {city} {tmpl['sfx']}"
-        # Avoid duplicate names
-        if name in used_names:
-            pfx = random.choice([p for p in PREFIXES if p != pfx])
-            name = f"{pfx} {city} {tmpl['sfx']}"
-        used_names.add(name)
-        dm_name = random.choice(DM_NAMES)
-        lead = {
-            "business_name": name, "segment": segment,
-            "city": city, "state": state, "tier": tier,
-            "address": f"{random.randint(10, 250)}, {random.choice(ROAD_NAMES)}, {city}",
-            "phone": f"+91-{random.randint(7,9)}{random.randint(000000000, 999999999):09d}",
-            "email": "",
-            "website": "",
-            "rating": round(tmpl["rating"] + random.uniform(-0.2, 0.2), 1),
-            "num_outlets": tmpl["outlets"],
-            "decision_maker_name": dm_name,
-            "decision_maker_role": random.choice(DM_ROLES),
-            "decision_maker_linkedin": "",
-            "has_dessert_menu": tmpl.get("has_dessert", False),
-            "hotel_category": tmpl.get("hotel_cat", ""),
-            "is_chain": tmpl.get("is_chain", False),
-            "source": "ai_generated",
-            "monthly_volume_estimate": tmpl.get("vol", "")
-        }
-        score, priority, reasoning = calculate_lead_score(lead)
-        lead["ai_score"] = score; lead["ai_reasoning"] = reasoning; lead["priority"] = priority
-        results.append(lead)
-    return results
 
 
 # ─── API ROUTES ───────────────────────────────────────────────────────────────
@@ -516,7 +330,6 @@ async def get_leads(
     priority: Optional[str] = None, status: Optional[str] = None,
     min_score: Optional[int] = None, search: Optional[str] = None,
     limit: int = 100, skip: int = 0,
-    db: AsyncSession = Depends(get_db)
 ):
     async with AsyncSessionLocal() as session:
         stmt = select(LeadModel)
@@ -557,19 +370,204 @@ async def get_leads(
 
 @api_router.get("/leads/csv-template")
 async def get_csv_template():
-    headers = ["business_name", "segment", "city", "state", "tier", "address", "phone", "email",
-               "website", "rating", "num_outlets", "decision_maker_name", "decision_maker_role",
-               "decision_maker_linkedin", "has_dessert_menu", "hotel_category", "is_chain", "monthly_volume_estimate"]
-    sample = ["The Grand Hotel", "Hotel", "Mumbai", "Maharashtra", "1", "Colaba, Mumbai",
-              "9876543210", "procurement@grandhotel.com", "www.grandhotel.com", "4.5", "3",
-              "Rajesh Kumar", "Procurement Manager", "linkedin.com/in/rajeshkumar", "true", "5-star", "false", "500kg"]
-    content = ",".join(headers) + "\n" + ",".join(sample)
-    return Response(content=content, media_type="text/csv",
-                    headers={"Content-Disposition": "attachment; filename=horeca_leads_template.csv"})
+    """Generate an Excel template (.xlsx) with in-cell dropdown validation
+    for the city and segment columns, sourced from the active pipeline config."""
+    import io as _io
+
+    # ── Fetch active cities & segments from DB ───────────────────────────────
+    async with AsyncSessionLocal() as session:
+        city_rows = (await session.execute(
+            select(City).where(City.is_active == True).order_by(City.priority.asc(), City.name.asc())
+        )).scalars().all()
+        seg_rows = (await session.execute(
+            select(Segment).where(Segment.is_active == True).order_by(Segment.priority.asc(), Segment.label.asc())
+        )).scalars().all()
+
+    city_names = [c.name for c in city_rows] or ["Mumbai", "Delhi", "Bangalore"]
+    seg_keys   = [s.key  for s in seg_rows]  or ["Hotel", "Restaurant", "Cafe", "Bakery"]
+
+    # ── Build workbook ───────────────────────────────────────────────────────
+    wb = openpyxl.Workbook()
+
+    # ── Hidden reference sheet for dropdown lists ────────────────────────────
+    ref_ws = wb.create_sheet("_ref", 0)
+    ref_ws.sheet_state = "hidden"
+    for i, name in enumerate(city_names, start=1):
+        ref_ws.cell(row=i, column=1, value=name)
+    for i, key in enumerate(seg_keys, start=1):
+        ref_ws.cell(row=i, column=2, value=key)
+
+    city_ref = f"_ref!$A$1:$A${len(city_names)}"
+    seg_ref  = f"_ref!$B$1:$B${len(seg_keys)}"
+
+    # ── Main data sheet ──────────────────────────────────────────────────────
+    ws = wb.create_sheet("Leads", 1)
+    wb.active = ws
+
+    COLUMNS = [
+        ("business_name",          "Business Name *"),
+        ("segment",                "Segment *"),
+        ("city",                   "City *"),
+        ("state",                  "State"),
+        ("tier",                   "Tier (1/2/3)"),
+        ("address",                "Address"),
+        ("phone",                  "Phone"),
+        ("email",                  "Email"),
+        ("website",                "Website"),
+        ("rating",                 "Rating (0-5)"),
+        ("num_outlets",            "No. of Outlets"),
+        ("decision_maker_name",    "Decision Maker Name"),
+        ("decision_maker_role",    "Decision Maker Role"),
+        ("decision_maker_linkedin","Decision Maker LinkedIn"),
+        ("has_dessert_menu",       "Has Dessert Menu (true/false)"),
+        ("hotel_category",         "Hotel Category"),
+        ("is_chain",               "Is Chain (true/false)"),
+        ("monthly_volume_estimate","Monthly Volume Estimate"),
+    ]
+
+    SAMPLE = [
+        "The Grand Palace Hotel", seg_keys[0], city_names[0],
+        city_rows[0].state if city_rows else "",
+        "1", "Colaba, Mumbai", "+91-9876543210",
+        "procurement@grandhotel.com", "www.grandhotel.com",
+        "4.5", "3", "Rajesh Kumar", "Procurement Manager",
+        "linkedin.com/in/rajeshkumar", "true", "5-star", "false", "500-800 kg",
+    ]
+
+    # Header style
+    hdr_fill   = PatternFill("solid", fgColor="627F31")
+    hdr_font   = Font(bold=True, color="FFFFFF", size=10)
+    hdr_align  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin_side  = Side(style="thin", color="CCCCCC")
+    thin_border= Border(left=thin_side, right=thin_side, bottom=thin_side)
+
+    for col_idx, (key, label) in enumerate(COLUMNS, start=1):
+        col_letter = get_column_letter(col_idx)
+        # Header row
+        hdr_cell = ws.cell(row=1, column=col_idx, value=label)
+        hdr_cell.fill   = hdr_fill
+        hdr_cell.font   = hdr_font
+        hdr_cell.alignment = hdr_align
+        hdr_cell.border = thin_border
+        # Sample row
+        sample_cell = ws.cell(row=2, column=col_idx, value=SAMPLE[col_idx - 1])
+        sample_cell.alignment = Alignment(vertical="center")
+        # Column widths — wider for free-text fields
+        wide_cols = {"address": 40, "website": 32, "email": 32,
+                     "decision_maker_linkedin": 36, "monthly_volume_estimate": 24}
+        ws.column_dimensions[col_letter].width = wide_cols.get(key, max(len(label), 18))
+
+    ws.row_dimensions[1].height = 32
+    ws.freeze_panes = "A2"  # freeze header
+
+    # ── Dropdown validations (rows 2-1001 = 1000 data rows) ──────────────────
+    MAX_ROW = 1001
+
+    seg_col  = next(i for i, (k, _) in enumerate(COLUMNS, 1) if k == "segment")
+    city_col = next(i for i, (k, _) in enumerate(COLUMNS, 1) if k == "city")
+
+    dv_seg = DataValidation(
+        type="list",
+        formula1=seg_ref,
+        allow_blank=True,
+        showDropDown=False,
+        showErrorMessage=True,
+        errorTitle="Invalid segment",
+        error=f"Choose one of the active segments: {', '.join(seg_keys[:8])}{'…' if len(seg_keys) > 8 else ''}",
+    )
+    dv_seg.sqref = f"{get_column_letter(seg_col)}2:{get_column_letter(seg_col)}{MAX_ROW}"
+    ws.add_data_validation(dv_seg)
+
+    dv_city = DataValidation(
+        type="list",
+        formula1=city_ref,
+        allow_blank=True,
+        showDropDown=False,
+        showErrorMessage=True,
+        errorTitle="Invalid city",
+        error=f"Choose one of the active target cities: {', '.join(city_names[:8])}{'…' if len(city_names) > 8 else ''}",
+    )
+    dv_city.sqref = f"{get_column_letter(city_col)}2:{get_column_letter(city_col)}{MAX_ROW}"
+    ws.add_data_validation(dv_city)
+
+    # ── Boolean dropdowns (true / false) ─────────────────────────────────────
+    bool_cols = [k for k, _ in COLUMNS if k in ("has_dessert_menu", "is_chain")]
+    dv_bool = DataValidation(
+        type="list",
+        formula1='"true,false"',
+        allow_blank=True,
+        showDropDown=False,
+        showErrorMessage=True,
+        errorTitle="Invalid value",
+        error="Choose true or false",
+    )
+    for bool_key in bool_cols:
+        col_idx = next(i for i, (k, _) in enumerate(COLUMNS, 1) if k == bool_key)
+        col_letter = get_column_letter(col_idx)
+        dv_bool.sqref = f"{col_letter}2:{col_letter}{MAX_ROW}" if not dv_bool.sqref else f"{dv_bool.sqref} {col_letter}2:{col_letter}{MAX_ROW}"
+    ws.add_data_validation(dv_bool)
+
+    # ── Tier dropdown (1 / 2 / 3) ────────────────────────────────────────────
+    tier_col_idx = next(i for i, (k, _) in enumerate(COLUMNS, 1) if k == "tier")
+    tier_letter = get_column_letter(tier_col_idx)
+    dv_tier = DataValidation(
+        type="list",
+        formula1='"1,2,3"',
+        allow_blank=True,
+        showDropDown=False,
+        showErrorMessage=True,
+        errorTitle="Invalid tier",
+        error="Choose 1 (Metro), 2 (Tier 2), or 3 (Tier 3)",
+    )
+    dv_tier.sqref = f"{tier_letter}2:{tier_letter}{MAX_ROW}"
+    ws.add_data_validation(dv_tier)
+
+    # ── Hotel category dropdown ───────────────────────────────────────────────
+    hcat_col_idx = next((i for i, (k, _) in enumerate(COLUMNS, 1) if k == "hotel_category"), None)
+    if hcat_col_idx:
+        hcat_letter = get_column_letter(hcat_col_idx)
+        dv_hcat = DataValidation(
+            type="list",
+            formula1='"3-star,4-star,5-star"',
+            allow_blank=True,
+            showDropDown=False,
+            showErrorMessage=True,
+            errorTitle="Invalid category",
+            error="Choose 3-star, 4-star, or 5-star (leave blank for non-hotels)",
+        )
+        dv_hcat.sqref = f"{hcat_letter}2:{hcat_letter}{MAX_ROW}"
+        ws.add_data_validation(dv_hcat)
+
+    # ── Reference sheet visible to user ──────────────────────────────────────
+    info_ws = wb.create_sheet("Valid Values", 2)
+    info_ws.column_dimensions["A"].width = 24
+    info_ws.column_dimensions["B"].width = 24
+
+    def write_section(sheet, start_row, title, values, col):
+        hdr = sheet.cell(row=start_row, column=col, value=title)
+        hdr.font = Font(bold=True, color="FFFFFF", size=10)
+        hdr.fill = PatternFill("solid", fgColor="627F31")
+        hdr.alignment = Alignment(horizontal="center")
+        for i, v in enumerate(values, start=start_row + 1):
+            sheet.cell(row=i, column=col, value=v)
+
+    write_section(info_ws, 1, f"Active Cities ({len(city_names)})", city_names, 1)
+    write_section(info_ws, 1, f"Active Segments ({len(seg_keys)})",  seg_keys,   2)
+
+    # ── Serialize & return ───────────────────────────────────────────────────
+    buf = _io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=horeca_leads_template.xlsx"},
+    )
 
 
 @api_router.post("/leads/upload-csv")
-async def upload_csv(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def upload_csv(file: UploadFile = File(...)):
     content = await file.read()
     try:
         text = content.decode('utf-8-sig')
@@ -607,81 +605,112 @@ async def upload_csv(file: UploadFile = File(...), db: AsyncSession = Depends(ge
                 if not lead_data['business_name'] or not lead_data['city']:
                     errors.append(f"Row {i + 2}: Missing business_name or city")
                     continue
-                doc = make_lead_doc(lead_data)
-                session.add(LeadModel(**doc))
-                created.append(doc)
+                doc = make_lead_obj(lead_data)
+                session.add(doc)
+                created.append(doc.to_dict())
             except Exception as e:
                 errors.append(f"Row {i + 2}: {str(e)}")
         await session.commit()
 
-    await db.commit()
     return {"created": len(created), "errors": errors}
 
 
 @api_router.post("/leads/discover")
 async def discover_leads(req: DiscoverRequest):
-    city = req.city.strip()
+    city    = req.city.strip()
     segment = req.segment.strip()
-    state = req.state.strip()
-    results = []
+    state   = req.state.strip()
 
     logger.info(f"[DISCOVER] Request — city={city!r}, segment={segment!r}, state={state!r}")
 
-    query_tmpl = SEGMENT_QUERIES.get(segment, "restaurant {city} {state} India")
-    query = query_tmpl.replace("{city}", city).replace("{state}", state)
-    logger.info(f"[DISCOVER] Nominatim query: {query!r}")
+    # ───────────────────────────────────────────────────────────────────
+    # PATH A — Real pipeline (SerpAPI available)
+    # Runs stages 1–4: Extract → AI enrich → KPI filter → Dedup
+    # Returns leads for user review; saving happens via /leads/bulk-create
+    # ───────────────────────────────────────────────────────────────────
+    if _SERP_API_KEY:
+        try:
+            async with AsyncSessionLocal() as session:
+                # Stage 1: SerpAPI Google Maps — filtered to the chosen segment
+                raw = await ps.extract_business_data(city, session)
+                logger.info(f"[DISCOVER] Stage 1 extracted {len(raw)} raw places")
 
-    places = await search_nominatim(query)
-    logger.info(f"[DISCOVER] Nominatim returned {len(places)} place(s)")
+                if not raw:
+                    logger.warning(f"[DISCOVER] No SerpAPI results for city={city!r} segment={segment!r}")
+                    return []
 
-    for place in places:
-        name = place.get("name", "").strip()
-        if not name:
-            logger.debug(f"[DISCOVER] Skipping place with no name: {place.get('display_name', '')[:60]}")
-            continue
-        lead = nominatim_place_to_lead(place, segment, city, state)
-        logger.info(f"[DISCOVER] OSM lead: {lead['business_name']!r} (type={place.get('type','?')}) — score={lead['ai_score']}, priority={lead['priority']}")
-        results.append(lead)
+                # Stage 2: Gemini AI enrichment
+                enriched = await ps.ai_process_business_data(raw, session)
+                logger.info(f"[DISCOVER] Stage 2 AI-enriched {len(enriched)} businesses")
 
-    logger.info(f"[DISCOVER] OSM leads added: {len(results)}")
+                # Stage 3: KPI scoring + filtering
+                filtered = await ps.apply_kpi_filtering(enriched, session)
+                logger.info(f"[DISCOVER] Stage 3 KPI filtered → {len(filtered)} passed")
 
-    # Only supplement with simulation if OSM returned at least one result
-    if results:
-        simulated = generate_lead_simulation(city, segment, state)
-        logger.info(f"[DISCOVER] Simulated leads generated: {len(simulated)}")
-        for s in simulated:
-            logger.debug(f"[DISCOVER] Simulated: {s['business_name']!r} — score={s['ai_score']}, priority={s['priority']}")
-        results.extend(simulated)
-        logger.info(f"[DISCOVER] Total leads returned: {len(results)} (OSM={len(results) - len(simulated)}, Simulated={len(simulated)})")
-    else:
-        logger.warning(f"[DISCOVER] Nominatim returned 0 usable places for city={city!r}, segment={segment!r} — skipping simulation")
-        logger.info("[DISCOVER] Total leads returned: 0")
+                # Stage 4: Dedup against DB (skip businesses already stored)
+                deduped = await ps.deduplicate_leads(filtered, session)
+                logger.info(f"[DISCOVER] Stage 4 dedup → {len(deduped)} unique leads")
 
-    return results
+            # Normalise output to the shape the frontend expects
+            results = []
+            for biz in deduped:
+                results.append({
+                    "business_name":           biz.get("business_name", ""),
+                    "segment":                 biz.get("segment", segment),
+                    "city":                    biz.get("city", city),
+                    "state":                   biz.get("state", state),
+                    "tier":                    biz.get("tier", 1),
+                    "address":                 biz.get("address", ""),
+                    "phone":                   biz.get("phone", ""),
+                    "email":                   biz.get("email", ""),
+                    "website":                 biz.get("website", ""),
+                    "rating":                  biz.get("rating", 0.0),
+                    "num_outlets":             biz.get("num_outlets", 1),
+                    "hotel_category":          biz.get("hotel_category", ""),
+                    "is_chain":                bool(biz.get("is_chain", False)),
+                    "has_dessert_menu":        bool(biz.get("has_dessert_menu", False)),
+                    "decision_maker_name":     biz.get("decision_maker_name", ""),
+                    "decision_maker_role":     biz.get("decision_maker_role", ""),
+                    "decision_maker_linkedin": biz.get("decision_maker_linkedin", ""),
+                    "monthly_volume_estimate": f"{biz.get('monthly_sugar_estimate_kg', '')} kg".strip(),
+                    "ai_score":                int(biz.get("kpi_score", 0) or 0),
+                    "ai_reasoning":            biz.get("ai_reasoning", ""),
+                    "priority":                biz.get("priority", "Low"),
+                    "source":                  biz.get("source", "serpapi_google_maps"),
+                })
+            logger.info(f"[DISCOVER] Returning {len(results)} leads to frontend")
+            return results
+
+        except Exception as exc:
+            logger.error(f"[DISCOVER] Pipeline failed: {exc}", exc_info=True)
+            return []
+
+    logger.warning("[DISCOVER] SERP_API_KEY not configured — returning empty results")
+    return []
 
 
 @api_router.post("/leads/bulk-create")
-async def bulk_create_leads(req: BulkCreateRequest, db: AsyncSession = Depends(get_db)):
+async def bulk_create_leads(req: BulkCreateRequest):
     created = []
     async with AsyncSessionLocal() as session:
         for lead_dict in req.leads:
             lead_dict.pop('ai_score', None)
             lead_dict.pop('ai_reasoning', None)
             lead_dict.pop('priority', None)
-            doc = make_lead_doc(lead_dict)
-            session.add(LeadModel(**doc))
-            created.append(doc)
+            doc = make_lead_obj(lead_dict)
+            session.add(doc)
+            created.append(doc.to_dict())
         await session.commit()
     return {"created": len(created), "leads": created}
 
 
 @api_router.post("/leads")
 async def create_lead(lead: LeadCreate):
-    doc = make_lead_doc(lead.model_dump())
+    doc = make_lead_obj(lead.model_dump())
     async with AsyncSessionLocal() as session:
-        session.add(LeadModel(**doc))
+        session.add(doc)
         await session.commit()
-    return doc
+    return doc.to_dict()
 
 
 @api_router.get("/leads/{lead_id}")
@@ -718,56 +747,6 @@ async def delete_lead(lead_id: str):
         await session.delete(lead)
         await session.commit()
     return {"message": "Lead deleted"}
-
-
-# @api_router.post("/leads/{lead_id}/qualify-ai")
-# async def qualify_lead_ai(lead_id: str):
-#     async with AsyncSessionLocal() as session:
-#         result = await session.execute(select(LeadModel).where(LeadModel.id == lead_id))
-#         lead_obj = result.scalar_one_or_none()
-#         if not lead_obj:
-#             raise HTTPException(status_code=404, detail="Lead not found")
-#         lead = model_to_dict(lead_obj)
-
-#     api_key = os.environ.get('EMERGENT_LLM_KEY')
-#     if not api_key:
-#         raise HTTPException(status_code=500, detail="LLM API key not configured")
-
-#     try:
-#         chat = LlmChat(
-#             api_key=api_key, session_id=f"qualify-{lead_id}-{uuid.uuid4()}",
-#             system_message="You are a B2B sales qualification expert for Dhampur Green, India's premium sugar and sweetener brand."
-#         ).with_model("openai", "gpt-5.2")
-
-#         prompt = f"""Qualify this HORECA business for Dhampur Green (sugar/jaggery supplier):
-# Business: {lead.business_name}, Segment: {lead.segment}
-# Location: {lead.city}, {lead.state or 'India'} | Rating: {lead.rating}/5 | Outlets: {lead.num_outlets}
-# Hotel Category: {lead.hotel_category or 'N/A'} | Dessert Menu: {lead.has_dessert_menu} | Chain: {lead.is_chain}
-
-# Respond ONLY with valid JSON:
-# {{"ai_score":<0-100>,"monthly_volume_kg":"<range>","qualification_summary":"<2-3 sentences>","sugar_use_cases":["<uc1>","<uc2>","<uc3>"],"key_insight":"<sales insight>","priority":"<High/Medium/Low>","best_contact_time":"<recommendation>"}}"""
-
-#         response = await chat.send_message(UserMessage(text=prompt))
-#         json_str = response.strip()
-#         if '```json' in json_str: json_str = json_str.split('```json')[1].split('```')[0]
-#         elif '```' in json_str: json_str = json_str.split('```')[1].split('```')[0]
-#         ai_data = json.loads(json_str.strip())
-#         async with AsyncSessionLocal() as session:
-#             result = await session.execute(select(LeadModel).where(LeadModel.id == lead_id))
-#             lead_obj = result.scalar_one_or_none()
-#             if lead_obj:
-#                 lead_obj.ai_score = int(ai_data.get('ai_score', lead['ai_score']))
-#                 lead_obj.ai_reasoning = ai_data.get('qualification_summary', lead['ai_reasoning'])
-#                 lead_obj.priority = ai_data.get('priority', lead['priority'])
-#                 lead_obj.monthly_volume_estimate = ai_data.get('monthly_volume_kg', '')
-#                 lead_obj.updated_at = datetime.now(timezone.utc).isoformat()
-#                 await session.commit()
-#                 await session.refresh(lead_obj)
-#                 updated = model_to_dict(lead_obj)
-#         return {"lead": updated, "ai_analysis": ai_data}
-#     except Exception as e:
-#         logger.error(f"AI qualify error: {e}")
-#         raise HTTPException(status_code=500, detail=f"AI qualification failed: {str(e)}")
 
 
 @api_router.post("/leads/{lead_id}/qualify-ai")
@@ -836,76 +815,6 @@ Respond ONLY with valid JSON:
             status_code=500,
             detail=f"AI qualification failed: {str(e)}"
         )
-
-# @api_router.post("/leads/{lead_id}/generate-email")
-# async def generate_email(lead_id: str):
-#     async with AsyncSessionLocal() as session:
-#         result = await session.execute(select(LeadModel).where(LeadModel.id == lead_id))
-#         lead_obj = result.scalar_one_or_none()
-#         if not lead_obj:
-#             raise HTTPException(status_code=404, detail="Lead not found")
-#         lead = model_to_dict(lead_obj)
-
-#     api_key = os.environ.get('EMERGENT_LLM_KEY')
-#     if not api_key:
-#         raise HTTPException(status_code=500, detail="LLM API key not configured")
-
-#     try:
-#         chat = LlmChat(
-#             api_key=api_key, session_id=f"email-{lead_id}-{uuid.uuid4()}",
-#             system_message="You are an expert B2B sales copywriter for Dhampur Green, India's premium sugar and sweetener brand supplying HORECA businesses."
-#         ).with_model("openai", "gpt-5.2")
-
-#         dm = lead.decision_maker_name or 'Procurement Manager'
-#         first_name = dm.split()[0] if dm else 'Sir/Madam'
-
-#         prompt = f"""Write a personalized B2B outreach email for Dhampur Green targeting:
-# Business: {lead.business_name} ({lead.segment}, {lead.city})
-# Decision Maker: {dm} ({lead.decision_maker_role or 'F&B Head'})
-# Rating: {lead.rating}/5 | Outlets: {lead.num_outlets} | Dessert Menu: {lead.has_dessert_menu}
-# Monthly Volume Estimate: {lead.monthly_volume_estimate or 'Unknown'}
-
-# Dhampur Green Products: Premium refined sugar (M30/S30), sulphur-free jaggery, brown sugar, organic cane sugar, khandsari, icing sugar.
-
-# Write a 5-7 line professional email with specific subject, personalized opener, value prop, product rec, soft CTA, sign-off from "Arjun Mehta | Regional Sales Manager, Dhampur Green | +91-98765-43210"
-
-# Format EXACTLY:
-# SUBJECT: [subject]
-
-# Dear {first_name},
-# [body]"""
-
-#         response = await chat.send_message(UserMessage(text=prompt))
-#         lines = response.strip().split('\n')
-#         subject, body_lines, past_subject = "", [], False
-#         for line in lines:
-#             if line.startswith('SUBJECT:') and not past_subject:
-#                 subject = line.replace('SUBJECT:', '').strip(); past_subject = True
-#             else:
-#                 body_lines.append(line)
-#         body = '\n'.join(body_lines).strip()
-
-#         now = datetime.now(timezone.utc)
-#         doc = {
-#             "id": str(uuid.uuid4()),
-#             "lead_id": lead_id,
-#             "lead_name": lead['business_name'],
-#             "lead_city": lead['city'],
-#             "lead_segment": lead['segment'],
-#             "subject": subject,
-#             "body": body,
-#             "status": "draft",
-#             "generated_at": now.isoformat(),
-#             "sent_at": None
-#         }
-#         async with AsyncSessionLocal() as session:
-#             session.add(OutreachEmailModel(**doc))
-#             await session.commit()
-#         doc.pop('sent_at', None)
-#         return doc
-#     except Exception as e:
-#         logger.error(f"Email gen error: {e}")
-#         raise HTTPException(status_code=500, detail=f"Email generation failed: {str(e)}")
 
 
 @api_router.post("/leads/{lead_id}/generate-email")
@@ -1047,6 +956,7 @@ async def add_city(body: CityCreate):
             raise HTTPException(status_code=409, detail=f"City '{body.name}' already exists")
         city = City(
             name=body.name.strip(),
+            state=body.state.strip(),
             country=body.country,
             priority=body.priority,
             is_active=True,
@@ -1090,6 +1000,122 @@ async def delete_city(city_id: int):
         await session.delete(city)
         await session.commit()
     return Response(status_code=204)
+
+
+# ─── SEGMENT MANAGEMENT ─────────────────────────────────────────────────────
+
+# Master catalog — seeded once, then toggled / re-prioritised by admin
+SEGMENT_CATALOG = [
+    {"key": "Mithai",        "label": "Mithai / Sweets",    "cluster": "Traditional Sweets",     "color": "#A0522D", "description": "Mithai shops & sweet chains; highest sugar density per kg of product"},
+    {"key": "Bakery",        "label": "Bakery",             "cluster": "Bakery & Confectionery",  "color": "#B85C38", "description": "Bakeries, patisseries & cake shops; 15–30% sugar per product batch"},
+    {"key": "FoodProcessing","label": "Food Processing",    "cluster": "Food Processing",         "color": "#7B6D47", "description": "Industrial food processors, packaged-food manufacturers"},
+    {"key": "IceCream",      "label": "Ice Cream",          "cluster": "Dairy & Frozen",           "color": "#C4878A", "description": "Ice-cream parlours & dairy-frozen chains; 12–18% sugar in mix"},
+    {"key": "Beverage",      "label": "Beverage",           "cluster": "Beverage",                "color": "#4A7FA5", "description": "Juice bars, RTD beverage makers & soft-drink producers"},
+    {"key": "Catering",      "label": "Catering",           "cluster": "HORECA",                  "color": "#6B5E44", "description": "Event & bulk caterers; large per-event sugar volumes"},
+    {"key": "Cafe",          "label": "Café",               "cluster": "HORECA",                  "color": "#8FA39A", "description": "Coffee shops & cafés; syrups, frappes, baked goods"},
+    {"key": "CloudKitchen",  "label": "Cloud Kitchen",      "cluster": "HORECA",                  "color": "#D4956A", "description": "Delivery-only kitchens; high-throughput dessert menus"},
+    {"key": "Organic",       "label": "Organic",            "cluster": "Health & Organic",         "color": "#5A8A3C", "description": "Organic food brands, health-food stores, natural sweetener buyers"},
+    {"key": "Brewery",       "label": "Brewery",            "cluster": "Fermentation",             "color": "#7B4F72", "description": "Craft breweries & fermentation units; sucrose for fermentation"},
+    {"key": "Restaurant",    "label": "Restaurant",         "cluster": "HORECA",                  "color": "#3D6B56", "description": "Full-service restaurants & dhabas; dessert & cooking sugar"},
+    {"key": "Hotel",         "label": "Hotel",              "cluster": "HORECA",                  "color": "#662B01", "description": "Hotel F&B departments; multiple restaurant, pastry, banquet consumption"},
+]
+
+
+@api_router.get("/segments")
+async def list_segments():
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Segment).order_by(Segment.priority.asc(), Segment.label.asc())
+        )
+        segs = result.scalars().all()
+        return [s.to_dict() for s in segs]
+
+
+@api_router.post("/segments/seed", status_code=201)
+async def seed_segments():
+    """Idempotent seed — inserts catalog entries that do not yet exist."""
+    async with AsyncSessionLocal() as session:
+        created = []
+        for i, entry in enumerate(SEGMENT_CATALOG, start=1):
+            existing = await session.execute(
+                select(Segment).where(func.lower(Segment.key) == entry["key"].lower())
+            )
+            if existing.scalar_one_or_none():
+                continue
+            seg = Segment(
+                key=entry["key"],
+                label=entry["label"],
+                cluster=entry["cluster"],
+                description=entry["description"],
+                color=entry["color"],
+                is_active=True,
+                priority=i,
+            )
+            session.add(seg)
+            created.append(entry["key"])
+        await session.commit()
+        return {"seeded": created, "total": len(created)}
+
+
+@api_router.post("/segments", status_code=201)
+async def create_segment(body: SegmentCreate):
+    """Create a custom (admin-defined) segment."""
+    async with AsyncSessionLocal() as session:
+        existing = await session.execute(
+            select(Segment).where(func.lower(Segment.key) == body.key.strip().lower())
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail=f"Segment key '{body.key}' already exists")
+        # auto-assign priority = current max + 1
+        max_priority = (await session.execute(select(func.max(Segment.priority)))).scalar() or 0
+        seg = Segment(
+            key=body.key.strip(),
+            label=body.label.strip() or body.key.strip(),
+            cluster=body.cluster.strip(),
+            description=body.description.strip(),
+            color=body.color,
+            is_active=True,
+            priority=max_priority + 1,
+        )
+        session.add(seg)
+        await session.commit()
+        await session.refresh(seg)
+        return seg.to_dict()
+
+
+@api_router.delete("/segments/{seg_id}", status_code=204)
+async def delete_segment(seg_id: int):
+    async with AsyncSessionLocal() as session:
+        seg = await session.get(Segment, seg_id)
+        if not seg:
+            raise HTTPException(status_code=404, detail="Segment not found")
+        await session.delete(seg)
+        await session.commit()
+    return Response(status_code=204)
+
+
+@api_router.put("/segments/{seg_id}/toggle")
+async def toggle_segment(seg_id: int):
+    async with AsyncSessionLocal() as session:
+        seg = await session.get(Segment, seg_id)
+        if not seg:
+            raise HTTPException(status_code=404, detail="Segment not found")
+        seg.is_active = not seg.is_active
+        await session.commit()
+        await session.refresh(seg)
+        return seg.to_dict()
+
+
+@api_router.put("/segments/{seg_id}/priority")
+async def update_segment_priority(seg_id: int, body: SegmentPriorityUpdate):
+    async with AsyncSessionLocal() as session:
+        seg = await session.get(Segment, seg_id)
+        if not seg:
+            raise HTTPException(status_code=404, detail="Segment not found")
+        seg.priority = max(1, body.priority)
+        await session.commit()
+        await session.refresh(seg)
+        return seg.to_dict()
 
 
 @api_router.post("/seed-mock-data")
