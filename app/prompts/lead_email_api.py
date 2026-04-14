@@ -5,7 +5,7 @@ Prompt — API POST /leads/{id}/generate-email: quick outreach email from a
 saved lead record (used by the frontend "Generate Email" button).
 
 Caller : app/api/lead.py  →  generate_email()
-Model  : Gemini (call_genai)
+Model  : OpenAI (chat completions)
 Output : Plain text — "SUBJECT: ...\n\nDear {first_name},\n{body}"
 ─────────────────────────────────────────────────────────────────────────────
 """
@@ -22,16 +22,29 @@ def lead_email_api_prompt(
     num_outlets: int,
     has_dessert_menu: bool,
     monthly_volume_estimate: str,
+    reasoning: str = "",
 ) -> str:
-    return f"""Write a personalized B2B outreach email for Dhampur Green targeting:
-Business: {business_name} ({segment}, {city})
-Decision Maker: {dm} ({role or 'F&B Head'})
-Rating: {rating}/5 | Outlets: {num_outlets} | Dessert Menu: {has_dessert_menu}
-Monthly Volume Estimate: {monthly_volume_estimate or 'Unknown'}
+    return f"""
+    
+You are a B2B sales executive at Dhampur Green, India's premium quality sugar brand. Dhampur Green Products: 
+Premium refined sugar (M30/S30), sulphur-free jaggery, brown sugar, organic cane sugar, khandsari, icing sugar.
+Write a personalized outreach email to the following HORECA business.
 
-Dhampur Green Products: Premium refined sugar (M30/S30), sulphur-free jaggery, brown sugar, organic cane sugar, khandsari, icing sugar.
+Business Name  : {business_name}
+City           : {city}
+Segment        : {segment}
+Contact        : {dm or 'Procurement Team'}
+Role           : {role}
+Rating         : {rating}/5 | Outlets: {num_outlets} | Dessert Menu: {'Yes' if has_dessert_menu else 'No'}
+Monthly Sugar  : ~{monthly_volume_estimate} estimated
+AI Insight     : {reasoning or 'N/A'}
 
-Write a 5-7 line professional email. Sign off from "Arjun Mehta | Regional Sales Manager, Dhampur Green | +91-98765-43210"
+Guidelines:
+  - 150-200 words, concise and professional.
+  - Personalise based on segment / sugar usage.
+  - Highlight Dhampur Green: quality, sulphur-free sugar, reliable supply.
+  - Include a clear CTA (sample request or 15-min call).
+  - Sign off from "Arjun Mehta | Regional Sales Manager, Dhampur Green | +91-98765-43210"
 
 Format EXACTLY:
 SUBJECT: [subject]

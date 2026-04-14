@@ -1,10 +1,10 @@
 """
 app/prompts/business_intelligence.py
 ─────────────────────────────────────────────────────────────────────────────
-Prompt — Stage 2 (Gemini fallback): HORECA business sugar-intelligence analysis.
+Prompt — Stage 2: HORECA business sugar-intelligence analysis.
 
 Caller : app/pipelines/stages.py  →  ai_process_business_data()
-Model  : Gemini (call_genai)
+Model  : OpenAI (call_openai, force_json=True)
 Output : JSON — has_dessert_menu, monthly_sugar_estimate_kg, segment, etc.
 ─────────────────────────────────────────────────────────────────────────────
 """

@@ -28,6 +28,7 @@ import app.services.openai_client  # noqa: F401
 from app.agents.runners.run_classify import classify_business_runner
 from app.agents.runners.run_contacts import discover_contact
 from app.agents.runners.run_email import generate_outreach_email
+from app.core.constants import EmailStatus
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ async def run_stage7(businesses: list[dict]) -> dict:
                 "lead_segment": biz.get("segment"),
                 "subject":      email["subject"],
                 "body":         email["body"],
-                "status":       "draft",
+                "status":       EmailStatus.DRAFT,
                 "business":     biz,
             })
         except Exception as exc:
@@ -150,7 +151,7 @@ async def run_stage7(businesses: list[dict]) -> dict:
                 "lead_segment": biz.get("segment"),
                 "subject":      f"Sugar Supply Partnership — {biz.get('business_name')}",
                 "body":         "Agent unavailable — email generation failed.",
-                "status":       "draft",
+                "status":       EmailStatus.DRAFT,
                 "business":     biz,
             })
         await asyncio.sleep(0.3)

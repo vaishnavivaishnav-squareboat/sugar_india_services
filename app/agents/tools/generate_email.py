@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Annotated
 
 from agents import function_tool
+from app.core.constants import EmailStatus
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ def generate_email(
         "contact_name": contact_name,
         "subject":      subject,
         "body":         body,
-        "status":       "draft",
+        "status":       EmailStatus.DRAFT,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     try:

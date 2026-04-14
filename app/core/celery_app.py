@@ -1,10 +1,11 @@
 """
 app/core/celery_app.py
 ─────────────────────────────────────────────────────────────────────────────
-Celery application + weekly city-based HORECA ETL pipeline task.
+Celery application for the Dhampur Green HORECA Lead Intelligence platform.
 
-Unlike cron.py (which processes ALL cities per run), this processes ONE city
-per invocation using a round-robin selection strategy.
+Architecture: class-based tasks (celery.Task subclasses) registered via
+celery_app.register_task() — one class per task, __init__ for dependency
+injection, run() as the entry point.
 
 Start worker:
     celery -A app.core.celery_app worker --loglevel=info
@@ -13,9 +14,17 @@ Start beat scheduler:
     celery -A app.core.celery_app beat --loglevel=info
 ─────────────────────────────────────────────────────────────────────────────
 """
+from __future__ import absolute_import
+
+import asyncio
+import logging
+import uuid
+from datetime import datetime
+
+import celery
 from celery import Celery
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.orm import City, PipelineRun
 from app.db.session import AsyncSessionLocal
@@ -30,11 +39,6 @@ from app.pipelines.stages import (
     store_leads_and_emails,
 )
 
-import logging
-import asyncio
-import uuid
-from datetime import datetime
-
 logger = logging.getLogger(__name__)
 
 # ─── CELERY APP ───────────────────────────────────────────────────────────────
@@ -43,19 +47,36 @@ celery_app = Celery(
     "horeca_pipeline",
     broker="redis://localhost:6379/0",
     backend="redis://localhost:6379/1",
+    # Explicitly include this module so beat + worker always discover tasks
+    include=["app.core.celery_app"],
 )
 
-# Weekly beat schedule: every Monday at 02:00 AM IST
 celery_app.conf.beat_schedule = {
+    # Runs the full ETL pipeline for the next city (round-robin) every 7 days
     "weekly-city-pipeline": {
-        "task":     "app.core.celery_app.run_city_pipeline",
-        "schedule": 604800,  # 7 days in seconds
+        "task":     "run_city_pipeline",
+        "schedule": 604800,  # 7 days
+    },
+    # Sends follow-up emails to CONTACTED leads with no reply for 3+ days, daily
+    "daily-follow-up-emails": {
+        "task":     "send_follow_up_emails_task",
+        "schedule": 86400,   # 24 hours
+        "kwargs":   {"follow_up_after_days": 3},
     },
 }
 celery_app.conf.timezone = "Asia/Kolkata"
 
+print(celery_app)
 
-# ─── HELPERS ─────────────────────────────────────────────────────────────────
+
+# ─── DEBUG TASK ───────────────────────────────────────────────────────────────
+
+@celery_app.task(bind=True)
+def debug_task(self):
+    print(f"Request: {self.request!r}")
+
+
+# ─── ASYNC PIPELINE HELPERS ───────────────────────────────────────────────────
 
 async def _select_next_city(session: AsyncSession):
     """Round-robin: pick the active city least recently processed."""
@@ -85,22 +106,10 @@ async def _append_log(pipeline_run: PipelineRun, session: AsyncSession, stage: s
     await session.commit()
 
 
-# ─── MAIN CELERY TASK ────────────────────────────────────────────────────────
-
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def run_city_pipeline(self):
-    """
-    Main Celery entry point for the weekly city-based HORECA pipeline.
-    Celery tasks are synchronous; async stages are run via asyncio.run().
-    """
-    asyncio.run(_async_pipeline())
-
-
 async def _async_pipeline():
-    """Full async ETL pipeline – called from the Celery task wrapper."""
+    """Full async ETL pipeline — called from CityPipelineTask.run()."""
     async with AsyncSessionLocal() as session:
 
-        # ── Step 1: City selection (round-robin) ──────────────────────────
         city = await _select_next_city(session)
         if not city:
             logger.info("[Pipeline] No active cities to process.")
@@ -108,7 +117,6 @@ async def _async_pipeline():
 
         logger.info(f"[Pipeline] Processing city: {city.name}")
 
-        # ── Step 2: Create pipeline run record ────────────────────────────
         pipeline_run = PipelineRun(
             ulid=str(uuid.uuid4()),
             city_id=city.id,
@@ -168,6 +176,65 @@ async def _async_pipeline():
             logger.error(f"[Pipeline] City '{city.name}' failed: {exc}", exc_info=True)
 
         await session.commit()
-
-        # ── Step 3: Mark city as processed ────────────────────────────────
         await _update_city_last_processed(session, city.id)
+
+
+# ─── CLASS-BASED TASKS ────────────────────────────────────────────────────────
+
+class CityPipelineTask(celery.Task):
+    """
+    Weekly HORECA ETL pipeline — round-robin city selection.
+    Runs the full 8-stage pipeline for the least recently processed active city.
+    Retries up to 3 times on failure with a 60-second delay.
+    """
+    name              = "run_city_pipeline"
+    max_retries       = 3
+    default_retry_delay = 60
+
+    def run(self):
+        logger.info("[CityPipelineTask] Starting pipeline run")
+        try:
+            asyncio.run(_async_pipeline())
+        except Exception as exc:
+            logger.error(f"[CityPipelineTask] Failed: {exc}", exc_info=True)
+            raise self.retry(exc=exc)
+
+
+class BulkEmailTask(celery.Task):
+    """
+    Bulk outreach — generate + send personalised emails to all 'new' leads
+    that have no email or only a draft, then mark each lead as 'contacted'.
+
+    Dispatched by: POST /api/outreach/bulk-send
+    Polled via:    GET  /api/outreach/bulk-send/{task_id}
+    """
+    name = "send_bulk_emails_task"
+
+    def run(self):
+        from app.api.outreach import _run_bulk_send
+        logger.info("[BulkEmailTask] Starting bulk send")
+        return asyncio.run(_run_bulk_send())
+
+
+class FollowUpEmailTask(celery.Task):
+    """
+    Follow-up emails — send a follow-up to all 'contacted' leads whose
+    initial email is >= follow_up_after_days old with no reply yet.
+
+    Dispatched by: POST /api/outreach/follow-up
+    Polled via:    GET  /api/outreach/follow-up/{task_id}
+    Auto-runs:     Daily via Celery beat (follow_up_after_days=3)
+    """
+    name = "send_follow_up_emails_task"
+
+    def run(self, follow_up_after_days: int = 3):
+        from app.api.outreach import _run_follow_up
+        logger.info(f"[FollowUpEmailTask] Checking leads with no reply for {follow_up_after_days}+ days")
+        return asyncio.run(_run_follow_up(follow_up_after_days))
+
+
+# ─── REGISTER TASKS ───────────────────────────────────────────────────────────
+
+celery_app.register_task(CityPipelineTask())
+celery_app.register_task(BulkEmailTask())
+celery_app.register_task(FollowUpEmailTask())

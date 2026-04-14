@@ -46,6 +46,7 @@ from sqlalchemy import select, update
 from app.db.session import AsyncSessionLocal
 from app.db.orm import City, PipelineRun
 import app.pipelines.stages as ps
+from app.core.constants import EmailStatus
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_DIR = ROOT_DIR / "logs"
@@ -217,7 +218,7 @@ async def run_pipeline_for_city(city: City, dry_run: bool = False) -> dict:
                     "lead_segment": b.get("segment"),
                     "subject":      f"Sugar Supply Partnership — {b.get('business_name')} (Dhampur Green)",
                     "body":         f"[Dry-run email for {b.get('business_name')}]",
-                    "status":       "draft",
+                    "status":       EmailStatus.DRAFT,
                     "business":     b,
                 } for b in with_emails]
             else:

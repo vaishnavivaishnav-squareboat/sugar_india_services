@@ -29,6 +29,9 @@ from app.pipelines.stages import SERP_API_KEY as _SERP_API_KEY
 from app.db.orm import Lead, City, Segment, OutreachEmail, Contact
 from app.prompts.lead_qualify   import lead_qualify_prompt
 from app.prompts.lead_email_api import lead_email_api_prompt
+from app.services.openai_client import client as openai_client
+from app.core.config import OPENAI_MODEL
+from app.core.constants import EmailStatus
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +81,25 @@ async def get_leads(
             count_stmt = count_stmt.where(sf)
 
         total = (await session.execute(count_stmt)).scalar() or 0
-        leads = [model_to_dict(r) for r in (await session.execute(
-            stmt.order_by(desc(Lead.ai_score)).offset(skip).limit(limit)
-        )).scalars()]
+        lead_rows = (await session.execute(
+            stmt.order_by(desc(Lead.created_at)).offset(skip).limit(limit)
+        )).scalars().all()
+        leads = [model_to_dict(r) for r in lead_rows]
+
+        # Batch-fetch all contacts for the returned leads in one query
+        if lead_rows:
+            lead_ids = [r.id for r in lead_rows]
+            contact_rows = (await session.execute(
+                select(Contact).where(Contact.lead_id.in_(lead_ids))
+            )).scalars().all()
+            contacts_by_lead: dict[str, list] = {}
+            for c in contact_rows:
+                contacts_by_lead.setdefault(c.lead_id, []).append(c.to_dict())
+            for lead in leads:
+                lead["contacts"] = contacts_by_lead.get(lead["id"], [])
+        else:
+            for lead in leads:
+                lead["contacts"] = []
 
     return {"leads": leads, "total": total}
 
@@ -330,9 +349,21 @@ async def upload_csv(file: UploadFile = File(...)):
                 biz_phone = _col("phone", "Phone (Business)") or (dm_phone if not dm_name else "")
                 biz_email = _col("email", "Email (Business)") or (dm_email if not dm_name else "")
 
+                # "segment" column takes priority; then Sub industry (more specific) then Industry (general)
+                segment_val = (
+                    _col("segment", "Segment *", "Segment",
+                         "sub_industry", "Sub industry", "Sub Industry",
+                         "industry", "Industry")
+                    or "Restaurant"
+                )
+
+                # "has_dessert_menu" column (exact lowercase) or legacy label
+                has_dessert_raw = _col("has_dessert_menu", "Has Dessert Menu (true/false)")
+                has_dessert_val = has_dessert_raw.lower() in ("true", "1", "yes")
+
                 lead_data = {
                     "business_name":           _col("business_name", "Business Name *", "Business Name", "company_name", "Company Name") or "",
-                    "segment":                 _col("segment", "Segment *", "Segment", "industry", "Industry", "sub_industry", "Sub industry", "Sub Industry") or "Restaurant",
+                    "segment":                 segment_val,
                     "city":                    _col("city", "City *", "City") or "",
                     "state":                   _col("state", "State") or "",
                     "country":                 _col("country", "Country") or "India",
@@ -344,7 +375,7 @@ async def upload_csv(file: UploadFile = File(...)):
                     "description":             _col("description", "Company Description", "Company description", "company_description") or "",
                     "rating":                  float(_col("rating", "Rating (0-5)", "Rating") or "0"),
                     "num_outlets":             int(_col("num_outlets", "No. of Outlets") or "1"),
-                    "has_dessert_menu":        _col("has_dessert_menu", "Has Dessert Menu (true/false)").lower() in ("true", "1", "yes"),
+                    "has_dessert_menu":        has_dessert_val,
                     "hotel_category":          _col("hotel_category", "Hotel Category") or "",
                     "is_chain":                _col("is_chain", "Is Chain (true/false)").lower() in ("true", "1", "yes"),
                     "source":                  "csv_upload",
@@ -476,7 +507,12 @@ async def get_lead(lead_id: str):
         lead = (await session.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
         if not lead:
             raise HTTPException(status_code=404, detail="Lead not found")
-        return model_to_dict(lead)
+        lead_dict = model_to_dict(lead)
+        contact_rows = (await session.execute(
+            select(Contact).where(Contact.lead_id == lead_id)
+        )).scalars().all()
+        lead_dict["contacts"] = [c.to_dict() for c in contact_rows]
+        return lead_dict
 
 
 @lead_router.put("/{lead_id}/status")
@@ -530,15 +566,18 @@ async def qualify_lead_ai(lead_id: str):
             is_chain         = lead['is_chain'],
         )
 
-        response = call_genai(prompt, force_json=True)
-        json_str = response.strip()
-        if "```json" in json_str:
-            json_str = json_str.split("```json")[1].split("```")[0]
-        elif "```" in json_str:
-            json_str = json_str.split("```")[1].split("```")[0]
+        completion = await openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a HORECA lead qualification assistant. Always respond with valid JSON."},
+                {"role": "user",   "content": prompt},
+            ],
+        )
+        json_str = completion.choices[0].message.content.strip()
 
         try:
-            ai_data = json.loads(json_str.strip())
+            ai_data = json.loads(json_str)
         except json.JSONDecodeError:
             raise HTTPException(status_code=500, detail="Invalid AI JSON response")
 
@@ -577,16 +616,32 @@ async def generate_email(lead_id: str):
             raise HTTPException(status_code=404, detail="Lead not found")
         lead = model_to_dict(lead_obj)
 
-        # fetch primary contact for DM name/role
+        # fetch primary contact — required for personalisation
         primary_contact = (await session.execute(
             select(Contact)
             .where(Contact.lead_id == lead_id, Contact.is_primary == True)
             .limit(1)
         )).scalar_one_or_none()
 
+        if not primary_contact:
+            # fall back to any contact before giving up
+            primary_contact = (await session.execute(
+                select(Contact)
+                .where(Contact.lead_id == lead_id)
+                .limit(1)
+            )).scalar_one_or_none()
+
+        if not primary_contact:
+            raise HTTPException(
+                status_code=422,
+                detail="No contacts found for this lead. Add a contact before generating an email.",
+            )
+
+        print(f"Generating email for lead {lead_id} (DM: {primary_contact.name}, role: {primary_contact.role})")
+
     try:
-        dm         = (primary_contact.name if primary_contact else None) or "Procurement Manager"
-        first_name = dm.split()[0] if dm else "Sir/Madam"
+        dm         = primary_contact.name or "Procurement Manager"
+        first_name = dm.split()[0]
 
         prompt = lead_email_api_prompt(
             business_name           = lead['business_name'],
@@ -594,14 +649,22 @@ async def generate_email(lead_id: str):
             city                    = lead['city'],
             dm                      = dm,
             first_name              = first_name,
-            role                    = (primary_contact.role if primary_contact else None) or 'F&B Head',
+            role                    = primary_contact.role or 'F&B Head',
             rating                  = lead['rating'],
             num_outlets             = lead['num_outlets'],
             has_dessert_menu        = lead['has_dessert_menu'],
             monthly_volume_estimate = lead.get('monthly_volume_estimate') or 'Unknown',
+            reasoning               = lead.get('ai_reasoning') or 'N/A',
         )
 
-        response     = call_genai(prompt)
+        completion = await openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a B2B sales email writer for Dhampur Green, an Indian sugar supplier. Write professional, personalized outreach emails exactly in the format requested."},
+                {"role": "user",   "content": prompt},
+            ],
+        )
+        response     = completion.choices[0].message.content
         lines        = response.strip().split("\n")
         subject      = ""
         body_lines   = []
@@ -616,23 +679,42 @@ async def generate_email(lead_id: str):
 
         body = "\n".join(body_lines).strip()
         now  = datetime.now(timezone.utc)
-        doc  = {
-            "id":           str(uuid.uuid4()),
-            "lead_id":      lead_id,
-            "lead_name":    lead["business_name"],
-            "lead_city":    lead["city"],
-            "lead_segment": lead["segment"],
-            "subject":      subject,
-            "body":         body,
-            "status":       "draft",
-            "generated_at": now,
-        }
 
         async with AsyncSessionLocal() as session:
-            session.add(OutreachEmail(**doc))
-            await session.commit()
+            # Upsert: update the existing draft if one exists, else create new
+            existing_draft = (await session.execute(
+                select(OutreachEmail)
+                .where(
+                    OutreachEmail.lead_id == lead_id,
+                    OutreachEmail.status  == EmailStatus.DRAFT,
+                )
+                .order_by(OutreachEmail.generated_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
 
-        return doc
+            if existing_draft:
+                existing_draft.subject      = subject
+                existing_draft.body         = body
+                existing_draft.generated_at = now
+                await session.commit()
+                await session.refresh(existing_draft)
+                return model_to_dict(existing_draft)
+            else:
+                new_email = OutreachEmail(
+                    id           = str(uuid.uuid4()),
+                    lead_id      = lead_id,
+                    lead_name    = lead["business_name"],
+                    lead_city    = lead["city"],
+                    lead_segment = lead["segment"],
+                    subject      = subject,
+                    body         = body,
+                    status       = EmailStatus.DRAFT,
+                    generated_at = now,
+                )
+                session.add(new_email)
+                await session.commit()
+                await session.refresh(new_email)
+                return model_to_dict(new_email)
 
     except Exception as e:
         logger.error(f"Email gen error: {e}")

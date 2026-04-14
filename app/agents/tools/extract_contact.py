@@ -13,6 +13,7 @@ import logging
 from typing import Annotated
 
 from agents import function_tool
+from app.helpers.constants import roles
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,7 @@ def extract_contact(
     role: Annotated[
         str,
         (
-            "Job role — e.g. F&B Manager, Procurement Manager, Operations Manager, "
-            "Store Manager, General Manager, Owner, Founder — or empty string"
+                f"Job role — e.g. {', '.join(roles)} — or empty string"
         ),
     ],
     linkedin_url: Annotated[str, "Full LinkedIn profile URL or empty string"],

@@ -16,14 +16,12 @@ Modules:
 """
 from app.prompts.business_intelligence import business_intelligence_prompt
 from app.prompts.contact_extraction    import contact_extraction_prompt
-from app.prompts.email_generation      import email_generation_prompt
 from app.prompts.lead_qualify          import lead_qualify_prompt
 from app.prompts.lead_email_api        import lead_email_api_prompt
 
 __all__ = [
     "business_intelligence_prompt",
     "contact_extraction_prompt",
-    "email_generation_prompt",
     "lead_qualify_prompt",
     "lead_email_api_prompt",
 ]

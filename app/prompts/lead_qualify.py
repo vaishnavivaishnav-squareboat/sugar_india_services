@@ -4,7 +4,7 @@ app/prompts/lead_qualify.py
 Prompt — API POST /leads/{id}/qualify-ai: score and qualify a saved lead.
 
 Caller : app/api/lead.py  →  qualify_lead_ai()
-Model  : Gemini (call_genai)
+Model  : OpenAI (chat completions, json_object response format)
 Output : JSON — ai_score, monthly_volume_kg, qualification_summary,
                 sugar_use_cases, key_insight, priority, best_contact_time
 ─────────────────────────────────────────────────────────────────────────────

@@ -38,6 +38,7 @@ celery>=5.3.0
 redis>=5.0.0
 rapidfuzz>=3.6.0
 serpapi>=0.1.5
+aiosmtplib>=3.0.0
 openpyxl>=3.1.0
 # ─── OpenAI Agents ───────────────────────────────────────────────────────────
 openai>=2.0.0

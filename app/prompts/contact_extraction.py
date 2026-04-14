@@ -1,15 +1,15 @@
 """
 app/prompts/contact_extraction.py
 ─────────────────────────────────────────────────────────────────────────────
-Prompt — Stage 5 (Gemini fallback): procurement decision-maker extraction
+Prompt — Stage 5: procurement decision-maker extraction
 from SerpAPI web snippets.
 
 Caller : app/pipelines/stages.py  →  _ai_extract_contact()
-Model  : Gemini (call_genai)
+Model  : OpenAI (call_openai, force_json=True)
 Output : JSON — name, role, linkedin_url, confidence_score
 ─────────────────────────────────────────────────────────────────────────────
 """
-
+from app.helpers.constants import roles
 
 def contact_extraction_prompt(
     biz_name: str,
@@ -30,7 +30,7 @@ Web search results:
 Return ONLY a JSON object:
 {{
   "name"             : "<full name or empty string>",
-  "role"             : "<F&B Manager | Procurement Manager | Operations Manager | Owner | empty>",
+  "role"             : "Job role — e.g. {', '.join(roles)} — or empty string",
   "linkedin_url"     : "<LinkedIn URL or empty string>",
   "confidence_score" : <0.0-1.0>
 }}

@@ -165,6 +165,7 @@ import app.services.openai_client  # noqa: registers AsyncOpenAI client
 from app.db.session import AsyncSessionLocal
 import app.pipelines.stages as ps
 from app.agents.bridge import run_stage2, run_stage5, run_stage7
+from app.helpers.constants import roles
 
 logging.basicConfig(
     level=logging.INFO,
@@ -354,7 +355,8 @@ async def run_stage_5(businesses: list, dry_run: bool) -> list:
             city    = biz.get("city", "")
             segment = biz.get("segment", "Restaurant")
             snippets = []
-            for role_query in ["F&B Manager", "Procurement Manager", "Owner"]:
+            
+            for role_query in roles:
                 try:
                     query = f'"{name}" {city} {role_query} LinkedIn India'
                     hits  = await ps._serp_search(query)

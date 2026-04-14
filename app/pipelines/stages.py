@@ -28,17 +28,19 @@ from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import serpapi as serpapi_client
+from app.prompts.lead_email_api import lead_email_api_prompt
 from tenacity import retry, stop_after_attempt, wait_exponential
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.config import SERP_API_KEY, HUNTER_API_KEY, APOLLO_API_KEY
+from app.core.constants import LeadStatus, EmailStatus
 from pyhunter import AsyncPyHunter
 from app.prompts.business_intelligence import business_intelligence_prompt
 from app.prompts.contact_extraction    import contact_extraction_prompt
-from app.prompts.email_generation      import email_generation_prompt
 
 from app.db.orm import Lead, City, OutreachEmail, PipelineRun, Contact
-from app.utils.genai import call_genai
+from app.services.openai_client import call_openai
+from app.helpers.constants import roles
 
 
 logger = logging.getLogger(__name__)
@@ -104,15 +106,6 @@ SEGMENT_WEIGHTS = {
     "Restaurant":      60,
     "Hotel":           55,
 }
-
-ROLE_PRIORITY = [
-    "Procurement Manager", "Purchase Manager", "Purchase Head",
-    "Supply Chain Manager", "Supply Chain Head",
-    "F&B Manager", "F&B Director", "Production Manager", "Plant Manager",
-    "Operations Manager", "Operations Director",
-    "Store Manager", "General Manager",
-    "Owner", "Founder", "Co-Founder", "Director",
-]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -345,7 +338,7 @@ async def ai_process_business_data(raw_data: list, session: AsyncSession) -> lis
             identity_text=identity_text,
         )
         try:
-            ai = json.loads(call_genai(prompt, force_json=True))
+            ai = json.loads(await call_openai(prompt, force_json=True))
             biz.update({
                 "has_dessert_menu":             ai.get("has_dessert_menu", False),
                 "sugar_items_count":            ai.get("sugar_items_count", 0),
@@ -561,7 +554,7 @@ async def _ai_extract_contact(biz_name: str, city: str, segment: str, serp_snipp
         snippets_text=snippets_text,
     )
     try:
-        return json.loads(call_genai(prompt, force_json=True))
+        return json.loads(await call_openai(prompt, force_json=True))
     except Exception as exc:
         logger.warning(f"[Contacts] AI extraction failed for '{biz_name}': {exc}")
         return {"name": "", "role": "", "linkedin_url": "", "confidence_score": 0.0}
@@ -578,10 +571,7 @@ async def enrich_contacts(leads: list, session: AsyncSession) -> list:
         segment  = biz.get("segment", "Restaurant")
         contacts: list = []
 
-        for role_query in [
-            "F&B Manager", "Procurement Manager", "Owner",
-            "General Manager", "Operations Manager", "Sales Manager",
-        ]:
+        for role_query in roles:
             query = f'"{name}" {city} {role_query} LinkedIn'
             try:
                 snippets = await _serp_search(query)
@@ -888,27 +878,36 @@ async def generate_personalized_emails(enriched_leads: list, session: AsyncSessi
         rating       = biz.get("rating", 0)
         hotel_cat    = biz.get("hotel_category", "")
 
-        prompt = email_generation_prompt(
+        prompt = lead_email_api_prompt(
             name=name,
             city=city,
             segment=segment,
             contact_name=contact_name,
             contact_role=contact_role,
-            has_dessert=has_dessert,
+            has_dessert_menu=has_dessert,
             sugar_kg=sugar_kg,
             rating=rating,
             hotel_cat=hotel_cat,
             reasoning=reasoning,
         )
         try:
-            result = json.loads(call_genai(prompt, force_json=True))
+            raw = await call_openai(prompt)  # plain text: SUBJECT: ...\n\nDear ...\n{body}
+            subject, body = "", ""
+            body_lines, past_subject = [], False
+            for line in raw.strip().split("\n"):
+                if line.startswith("SUBJECT:") and not past_subject:
+                    subject = line.replace("SUBJECT:", "").strip()
+                    past_subject = True
+                else:
+                    body_lines.append(line)
+            body = "\n".join(body_lines).strip()
             emails.append({
                 "lead_name":    name,
                 "lead_city":    city,
                 "lead_segment": segment,
-                "subject":      result.get("subject", ""),
-                "body":         result.get("body", ""),
-                "status":       "draft",
+                "subject":      subject,
+                "body":         body,
+                "status":       EmailStatus.DRAFT,
                 "business":     biz,
             })
             logger.info(f"[EmailGen] Generated email for '{name}'")
@@ -955,7 +954,7 @@ async def store_leads_and_emails(final_leads: list, session: AsyncSession) -> bo
                 ai_score                     = int(biz.get("kpi_score", 0) or 0),
                 ai_reasoning                 = biz.get("ai_reasoning", ""),
                 priority                     = biz.get("priority", "Low"),
-                status                       = "new",
+                status                       = LeadStatus.NEW,
                 source                       = biz.get("source", "pipeline"),
                 monthly_volume_estimate      = f"{biz.get('monthly_sugar_estimate_kg', '')} kg",
                 highlights                   = biz.get("highlights", []),
@@ -999,7 +998,7 @@ async def store_leads_and_emails(final_leads: list, session: AsyncSession) -> bo
                 lead_segment = item.get("lead_segment", ""),
                 subject      = item.get("subject", ""),
                 body         = item.get("body", ""),
-                status       = "draft",
+                status       = EmailStatus.DRAFT,
                 generated_at = now,
             ))
 

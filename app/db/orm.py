@@ -68,8 +68,8 @@ class Lead(Base):
     sugar_signal_from_highlights = Column(Boolean, default=False)
     highlight_sugar_signals      = Column(JSON, default=list)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), default=func.now(), onupdate=func.now())
 
     def to_dict(self):
         return {
@@ -118,9 +118,11 @@ class OutreachEmail(Base):
     lead_segment = Column(String(50), default="")
     subject = Column(Text, default="")
     body = Column(Text, default="")
-    status = Column(String(50), default="draft")
+    status = Column(String(50), default="draft")  # use EmailStatus constants
+    email_type = Column(String(20), default="initial")  # "initial" | "follow_up"
     generated_at = Column(DateTime(timezone=True), server_default=func.now())
     sent_at = Column(DateTime(timezone=True), nullable=True)
+    sent_to_email = Column(String(255), nullable=True)
 
     def to_dict(self):
         return {
@@ -132,8 +134,10 @@ class OutreachEmail(Base):
             "subject": self.subject or "",
             "body": self.body or "",
             "status": self.status or "draft",
+            "email_type": self.email_type or "initial",
             "generated_at": self.generated_at.isoformat() if self.generated_at else None,
             "sent_at": self.sent_at.isoformat() if self.sent_at else None,
+            "sent_to_email": self.sent_to_email or "",
         }
 
 

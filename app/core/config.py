@@ -17,7 +17,6 @@ load_dotenv(ROOT_DIR / ".env")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
 # ── AI / LLM ─────────────────────────────────────────────────────────────
-GENAI_API_KEYS: str        = os.getenv("GENAI_API_KEYS", "")
 GOOGLE_PLACES_API_KEY: str = os.getenv("GOOGLE_PLACES_API_KEY", "")
 
 # ── Pipeline APIs ─────────────────────────────────────────────────────────
@@ -32,3 +31,10 @@ OPENAI_MODEL: str    = os.getenv("OPENAI_MODEL", "gpt-4o") # override via env if
 
 # ── Server ────────────────────────────────────────────────────────────────
 CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "*")
+
+# ── SMTP / Email Sending ──────────────────────────────────────────────────
+SMTP_HOST: str     = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT: int     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER: str     = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM: str     = os.getenv("SMTP_FROM", "")  # "Dhampur Green <you@gmail.com>"

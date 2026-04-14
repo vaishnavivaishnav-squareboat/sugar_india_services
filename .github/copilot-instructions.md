@@ -17,7 +17,7 @@ Two sibling packages at the repo root:
 | `app/api/` | One router per entity (`lead.py`, `city.py`, `segment.py`, `contact.py`, `outreach.py`, `dashboard.py`); aggregated in `app/api/__init__.py` as `api_router` with `/api` prefix |
 | `app/pipelines/stages.py` | 8 async ETL stage functions (~1 000 lines) |
 | `app/agents/` | OpenAI Agents SDK wrappers: `agents/` (Agent definitions), `runners/`, `tools/`, `bridge.py` (stage 2/5/7 entry), `pipeline.py` (demo script) |
-| `app/utils/genai.py` | `call_genai(prompt, force_json)` — Gemini `gemini-2.0-flash` with round-robin key rotation |
+| `app/services/openai_client.py` | `call_openai(prompt, force_json)` — async OpenAI chat completions helper used by all pipeline stages and API endpoints |
 | `app/utils/scoring.py` | `calculate_lead_score(data)` → `(score, priority, reasoning)`; `make_lead_obj()` |
 | `app/core/celery_app.py` | Celery app `horeca_pipeline`; **one city per invocation** (round-robin by `last_processed_at ASC`) |
 | `app/core/cron.py` | Weekly cron script; **all active cities per run**; uses `fcntl` lock to prevent overlap |
@@ -40,9 +40,9 @@ Two sibling packages at the repo root:
 
 `HORECA_QUERY_MAP` in `stages.py` controls which segments run — currently **only `Bakery`** is active; all others are commented out.
 
-### AI layer: two models in use
-- **Gemini** (`app/utils/genai.py`) — pipeline stages 2, 5, 7; `force_json=True` sets `response_mime_type: application/json`; keys rotated via `itertools.cycle` over `GENAI_API_KEYS`
-- **OpenAI Agents SDK** (`app/agents/`) — wraps same pipeline logic in typed `Agent` objects; **`import app.services.openai_client` must appear before any agent import** to register the async client and disable tracing
+### AI layer
+- **OpenAI** (`app/services/openai_client.py`) — all pipeline stages and API endpoints; `call_openai(prompt, force_json=True)` for JSON responses, `call_openai(prompt)` for plain text; model controlled by `OPENAI_MODEL` env var (default `gpt-4o`)
+- **OpenAI Agents SDK** (`app/agents/`) — wraps pipeline logic in typed `Agent` objects; **`import app.services.openai_client` must appear before any agent import** to register the async client and disable tracing
 
 ### Key conventions
 - `Lead.id` = `uuid4` string; `City`, `PipelineRun`, `Contact` use integer PK + ULID surrogate
@@ -55,7 +55,6 @@ Two sibling packages at the repo root:
 ## Required env vars
 ```
 DATABASE_URL           # asyncpg PostgreSQL URL
-GENAI_API_KEYS         # comma-separated Gemini API keys
 GOOGLE_PLACES_API_KEY  # Google Places (Stage 1)
 SERP_API_KEY           # SerpAPI (Stages 1 & 5)
 HUNTER_API_KEY         # Hunter.io (Stage 6)
