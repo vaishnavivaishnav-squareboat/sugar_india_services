@@ -1,10 +1,10 @@
 """
-cron_pipeline.py
-────────────────────────────────────────────────────────────────────────────
+app/core/cron.py
+─────────────────────────────────────────────────────────────────────────────
 Weekly cron script that runs the full 8-stage HORECA lead pipeline for
 EVERY active city configured in the database.
 
-Unlike celery_pipeline.py (which round-robins one city per Celery invocation),
+Unlike celery_app.py (which round-robins one city per Celery invocation),
 this script processes ALL active cities in sequence in a single run.
 
 ──────────────────────────────────────────────────────────────────────────────
@@ -12,16 +12,15 @@ SETUP — add to crontab:
     crontab -e
 
     # Every Monday at 02:00 AM IST
-    # (Note: escape the space in the path with quotes, not backslash)
-    0 2 * * 1  cd "/Users/vaishnavivaishnav/Documents/squareboat/Dhampur Green/sugar_india_services" && source venv/bin/activate && python cron_pipeline.py >> logs/cron_pipeline.log 2>&1
+    0 2 * * 1  cd "/path/to/sugar_india_services" && source venv/bin/activate && python -m app.core.cron >> logs/cron_pipeline.log 2>&1
 
 ──────────────────────────────────────────────────────────────────────────────
 MANUAL RUN:
     cd sugar_india_services
     source venv/bin/activate
-    python cron_pipeline.py                        # all active cities
-    python cron_pipeline.py --city Mumbai          # single city override
-    python cron_pipeline.py --city Mumbai --dry-run  # dry-run, no API calls
+    python -m app.core.cron                          # all active cities
+    python -m app.core.cron --city Mumbai            # single city override
+    python -m app.core.cron --city Mumbai --dry-run  # dry-run, no API calls
 ──────────────────────────────────────────────────────────────────────────────
 """
 
@@ -35,35 +34,33 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── project root on sys.path ─────────────────────────────────────────────────
-ROOT = Path(__file__).parent
-sys.path.insert(0, str(ROOT))
+# Ensure sugar_india_services/ is on sys.path so app.* imports resolve
+ROOT_DIR = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT_DIR))
 
 from dotenv import load_dotenv
-load_dotenv(ROOT / ".env")
+load_dotenv(ROOT_DIR / ".env")
 
 from sqlalchemy import select, update
-from database import AsyncSessionLocal
-from models import City, PipelineRun
 
-import pipeline_stages as ps
+from app.db.session import AsyncSessionLocal
+from app.db.orm import City, PipelineRun
+import app.pipelines.stages as ps
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-LOG_DIR = ROOT / "logs"
+LOG_DIR = ROOT_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("cron_pipeline")
 
 # ── Lock file (prevents overlapping cron runs) ────────────────────────────────
-LOCK_FILE = ROOT / "cron_pipeline.lock"
+LOCK_FILE = ROOT_DIR / "cron_pipeline.lock"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -75,8 +72,7 @@ def _separator(char: str = "─", width: int = 64) -> str:
 
 
 async def _get_active_cities(session, city_name_override: str = None) -> list:
-    """Return active City ORM objects, optionally filtered to a single city name."""
-    q = select(City).where(City.is_active == True).order_by(City.priority.desc())
+    q    = select(City).where(City.is_active == True).order_by(City.priority.desc())
     rows = (await session.execute(q)).scalars().all()
     if city_name_override:
         rows = [c for c in rows if c.name.lower() == city_name_override.lower()]
@@ -127,15 +123,9 @@ async def run_pipeline_for_city(city: City, dry_run: bool = False) -> dict:
     logger.info(_separator("═"))
 
     summary = {
-        "city": city_name,
-        "status": "failed",
-        "extracted": 0,
-        "ai_enriched": 0,
-        "kpi_passed": 0,
-        "deduped": 0,
-        "emails_generated": 0,
-        "stored": 0,
-        "error": None,
+        "city": city_name, "status": "failed",
+        "extracted": 0, "ai_enriched": 0, "kpi_passed": 0,
+        "deduped": 0, "emails_generated": 0, "stored": 0, "error": None,
     }
 
     async with AsyncSessionLocal() as session:
@@ -168,14 +158,14 @@ async def run_pipeline_for_city(city: City, dry_run: bool = False) -> dict:
             if dry_run:
                 for b in raw:
                     b.update({
-                        "has_dessert_menu": b["segment"] in ["Bakery", "Cafe"],
-                        "monthly_sugar_estimate_kg": 400 if b["segment"] == "Bakery" else 120,
-                        "sweetness_dependency_pct": 70 if b["segment"] == "Bakery" else 35,
+                        "has_dessert_menu":             b["segment"] in ["Bakery", "Cafe"],
+                        "monthly_sugar_estimate_kg":    400 if b["segment"] == "Bakery" else 120,
+                        "sweetness_dependency_pct":     70  if b["segment"] == "Bakery" else 35,
                         "sugar_signal_from_highlights": False,
-                        "highlight_sugar_signals": [],
-                        "ai_reasoning": "Mock: high sugar dependency",
-                        "is_chain": bool(b.get("is_chain", False)),
-                        "hotel_category": "",
+                        "highlight_sugar_signals":      [],
+                        "ai_reasoning":                 "Mock: high sugar dependency",
+                        "is_chain":                     bool(b.get("is_chain", False)),
+                        "hotel_category":               "",
                     })
                 ai_enriched = raw
             else:
@@ -202,26 +192,23 @@ async def run_pipeline_for_city(city: City, dry_run: bool = False) -> dict:
             await _log_stage(run, session, "stage_5", "Starting contact enrichment")
             if dry_run:
                 for b in deduped:
-                    b["decision_maker_name"] = "Priya Sharma (mock)"
-                    b["decision_maker_role"] = "F&B Manager"
+                    b["decision_maker_name"]     = "Priya Sharma (mock)"
+                    b["decision_maker_role"]     = "F&B Manager"
                     b["decision_maker_linkedin"] = ""
-                    b["contacts"] = []
+                    b["contacts"]                = []
                 with_contacts = deduped
             else:
                 with_contacts = await ps.enrich_contacts(deduped, session)
             await _log_stage(run, session, "stage_5", "Contact enrichment done")
-            logger.info(f"  Stage 5 ✓  →  contact enrichment done")
+            logger.info("  Stage 5 ✓  →  contact enrichment done")
 
             # ── Stage 6: Email Enrichment ──────────────────────────────────
             await _log_stage(run, session, "stage_6", "Starting email enrichment")
-            if dry_run:
-                with_emails = with_contacts
-            else:
-                with_emails = await ps.enrich_emails(with_contacts, session)
+            with_emails = with_contacts if dry_run else await ps.enrich_emails(with_contacts, session)
             await _log_stage(run, session, "stage_6", "Email enrichment done")
-            logger.info(f"  Stage 6 ✓  →  email enrichment done")
+            logger.info("  Stage 6 ✓  →  email enrichment done")
 
-            # ── Stage 7: Personalized Email Generation ─────────────────────
+            # ── Stage 7: Email Generation ──────────────────────────────────
             await _log_stage(run, session, "stage_7", "Starting email generation")
             if dry_run:
                 email_items = [{
@@ -242,7 +229,7 @@ async def run_pipeline_for_city(city: City, dry_run: bool = False) -> dict:
             # ── Stage 8: Store to DB ───────────────────────────────────────
             await _log_stage(run, session, "stage_8", "Storing to DB")
             success = await ps.store_leads_and_emails(email_items, session)
-            stored = len(email_items) if success else 0
+            stored  = len(email_items) if success else 0
             summary["stored"] = stored
             await _log_stage(
                 run, session, "stage_8",
@@ -250,13 +237,13 @@ async def run_pipeline_for_city(city: City, dry_run: bool = False) -> dict:
             )
             logger.info(f"  Stage 8 ✓  →  {stored} leads + emails stored to DB")
 
-            run.status = "completed"
+            run.status       = "completed"
             run.completed_at = datetime.now(timezone.utc)
             await session.commit()
             summary["status"] = "completed"
 
         except Exception as exc:
-            run.status = "failed"
+            run.status       = "failed"
             run.completed_at = datetime.now(timezone.utc)
             logs = run.logs or {}
             logs["error"] = str(exc)
@@ -283,7 +270,6 @@ async def main(city_override: str = None, dry_run: bool = False):
     print(f"  Mode: {'🏜  Dry-run (mock data)' if dry_run else '🌐  Live (real API calls)'}")
     print(_separator("━"))
 
-    # Fetch active cities
     async with AsyncSessionLocal() as session:
         cities = await _get_active_cities(session, city_override)
 
@@ -304,7 +290,6 @@ async def main(city_override: str = None, dry_run: bool = False):
         summary = await run_pipeline_for_city(city, dry_run=dry_run)
         all_summaries.append(summary)
 
-    # ── Final summary report ──────────────────────────────────────────────────
     elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
     print(f"\n{_separator('═')}")
     print(f"  CRON RUN COMPLETE  |  elapsed: {elapsed:.0f}s")
@@ -328,30 +313,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Weekly cron script — runs HORECA pipeline for all active cities"
     )
-    parser.add_argument(
-        "--city",
-        default=None,
-        help="Process only this city (overrides DB-driven city list)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Use mock data — skips real SerpAPI / Gemini / Hunter calls",
-    )
-    parser.add_argument(
-        "--no-lock",
-        action="store_true",
-        help="Skip the lock file check (useful for manual debugging)",
-    )
+    parser.add_argument("--city",     default=None, help="Process only this city")
+    parser.add_argument("--dry-run",  action="store_true", help="Use mock data — skips real API calls")
+    parser.add_argument("--no-lock",  action="store_true", help="Skip the lock file check")
     args = parser.parse_args()
 
-    # ── Lock file: prevent overlapping cron runs ──────────────────────────────
     if not args.no_lock:
         lock_fh = open(LOCK_FILE, "w")
         try:
             fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print("⚠️  Another cron_pipeline.py is already running. Exiting.")
+            print("⚠️  Another cron_pipeline is already running. Exiting.")
             sys.exit(0)
 
     try:

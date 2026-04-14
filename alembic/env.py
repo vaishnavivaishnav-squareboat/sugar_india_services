@@ -1,10 +1,19 @@
-from logging.config import fileConfig
+import sys
+from pathlib import Path
 
+# Ensure sugar_india_services/ is on sys.path so app.* imports resolve
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from logging.config import fileConfig
 from sqlalchemy import create_engine, engine_from_config
 from sqlalchemy import pool
-
 from alembic import context
-from models import Base  # Import your SQLAlchemy models here
+
+# Import Base and all ORM models so alembic can detect them for autogenerate
+from app.db.orm import Base  # noqa: F401
+from app.db.orm import Lead, OutreachEmail, City, PipelineRun, Segment, Contact  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

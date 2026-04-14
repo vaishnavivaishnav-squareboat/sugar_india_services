@@ -7,53 +7,135 @@ Run a single stage:
     1. python tests/test_pipeline.py --stage 1 --city Gurgaon (SerpApi call to find all the restaurants, cafes...in {city})
     Response:
     {
-        "place_id": "ChIJVVcsPJg9DTkRKOXisrZv2O4",
-        "business_name": "Under The Neem",
-        "address": "Karma Lakelands, Sector 80, Gurugram, Haryana 122012",
-        "phone": "096252 91720",
-        "website": "https://karmachalets.co.in/under-the-neem",
-        "rating": 4.4,
-        "reviews_count": 2897,
-        "lat": 28.3616052,
-        "lng": 76.958631,
-        "segment": "Restaurant",
-        "city": "Gurgaon",
-        "state": "",
+        "place_id": "ChIJL7-ALkoZDTkRhIFPFMUs1oE",
+        "business_name": "Theobroma Bakery and Cake Shop - Baani Square, Gurugram",
+        "address": "Shop No. G-6, Ground Floor, B Block A, Baani Square, Sector 50, Gurugram, Haryana 122018, India",
+        "phone": "+91 81828 81881",
+        "website": "https://order.theobroma.in",
+        "description": "",
+        "rating": 4.6,
+        "reviews_count": 437,
+        "lat": 28.4257079,
+        "lng": 77.05772809999999,
+        "types": ["bakery"],
+        "highlights": ["Great coffee","Great dessert","Great tea selection","Sports"],
+        "offerings": ["Coffee"],
+        "from_the_business": [],
+        "segment": "Bakery",
+        "city": "Gurugram",
+        "state": "Haryana",
+        "tier": 1,
+        "num_outlets": 1,
+        "is_chain": False,
+        "source": "serpapi_google_maps"
+    }
+
+
+
+    2. python tests/test_pipeline.py --stage 2 --city Gurgaon (Stage 2 — Dessert menu and sugar dependency estimation — AI processing {n} businesses)
+    Response:
+    {
+        "place_id": "ChIJL7-ALkoZDTkRhIFPFMUs1oE",
+        "business_name": "Theobroma Bakery and Cake Shop - Baani Square, Gurugram",
+        "address": "Shop No. G-6, Ground Floor, B Block A, Baani Square, Sector 50, Gurugram, Haryana 122018, India",
+        "phone": "+91 81828 81881",
+        "website": "https://order.theobroma.in",
+        "description": "",
+        "rating": 4.6,
+        "reviews_count": 437,
+        "lat": 28.4257079,
+        "lng": 77.05772809999999,
+        "highlights": [
+            "Great coffee",
+            "Great dessert",
+            "Great tea selection",
+            "Sports"
+        ],
+        "offerings": [
+            "Coffee"
+        ],
+        "from_the_business": [],
+        "segment": "Bakery",
+        "city": "Gurugram",
+        "state": "Haryana",
         "tier": 1,
         "num_outlets": 1,
         "is_chain": false,
-        "source": "serpapi_google_maps"
-        }
-
-
-
-    2. python tests/test_pipeline.py --stage 2 --city Gurgaon (Tells us if the restaurant has a dessert menu, and estimates sugar dependency based on the KPIs)
-    Response:
-    {
-        "place_id": "mock_003",
-        "business_name": "Brewer's Cafe & Desserts",
-        "address": "Golf Course Road, Gurgaon, Haryana",
-        "phone": "+91-9988776655",
-        "website": "https://brewerscafe.in",
-        "rating": 4.6,
-        "reviews_count": 480,
-        "lat": 28.44,
-        "lng": 77.1,
-        "segment": "Cafe",
-        "city": "Gurgaon",
-        "state": "Haryana",
-        "tier": 1,
-        "num_outlets": 12,
-        "is_chain": false,
-        "source": "mock",
+        "source": "serpapi_google_maps",
         "has_dessert_menu": true,
         "sugar_items_count": 15,
         "avg_price_range": "mid-range",
         "hotel_category": "",
-        "monthly_sugar_estimate_kg": 25,
-        "sweetness_dependency_pct": 60,
-        "ai_reasoning": "Brewer's Cafe, based on its name and the presence of desserts, relies heavily on sugar for its menu items. With a 4.6 rating, it likely has decent footfall, justifying a moderate monthly sugar estimate."
+        "monthly_sugar_estimate_kg": 300,
+        "sweetness_dependency_pct": 80,
+        "sugar_signal_from_highlights": true,
+        "highlight_sugar_signals": [
+            "Great dessert",
+            "Great coffee"
+        ],
+        "ai_reasoning": "The name 'Theobroma Bakery and Cake Shop' and business type 'bakery' strongly indicate a focus on desserts and sugar-heavy items. Highlights such as 'Great dessert' confirm this, and 'Great coffee' suggests sweet beverages are offered. The independent outlet has a 4.6 rating with 437 reviews, indicating moderate popularity. As a bakery, the sugar usage is estimated at 300 kg per month with 80% sweetness dependency. The mid-range pricing is inferred from the high rating and location in Gurugram. The classification as a 'Bakery' aligns with the available information."
         }
+
+
+    3. python tests/test_pipeline.py --stage 3 --city Gurgaon (Stage 3 — KPI filtering {n} businesses)
+    Response:
+    {
+        "place_id": "ChIJL7-ALkoZDTkRhIFPFMUs1oE",
+        "business_name": "Theobroma Bakery and Cake Shop - Baani Square, Gurugram",
+        "address": "Shop No. G-6, Ground Floor, B Block A, Baani Square, Sector 50, Gurugram, Haryana 122018, India",
+        "phone": "+91 81828 81881",
+        "website": "https://order.theobroma.in",
+        "description": "",
+        "rating": 4.6,
+        "reviews_count": 437,
+        "lat": 28.4257079,
+        "lng": 77.05772809999999,
+        "highlights": [
+            "Great coffee",
+            "Great dessert",
+            "Great tea selection",
+            "Sports"
+        ],
+        "offerings": [
+            "Coffee"
+        ],
+        "from_the_business": [],
+        "segment": "Bakery",
+        "city": "Gurugram",
+        "state": "Haryana",
+        "tier": 1,
+        "num_outlets": 1,
+        "is_chain": false,
+        "source": "serpapi_google_maps",
+        "has_dessert_menu": true,
+        "sugar_items_count": 20,
+        "avg_price_range": "mid-range",
+        "hotel_category": "",
+        "monthly_sugar_estimate_kg": 250,
+        "sweetness_dependency_pct": 85,
+        "sugar_signal_from_highlights": true,
+        "highlight_sugar_signals": [
+            "Great dessert",
+            "Great coffee"
+        ],
+        "ai_reasoning": "Sugar ~250.0 kg/month | Sweetness dependency 85.0% | Has dessert menu | Highlight sugar signals: Great dessert, Great coffee | Segment Bakery (w=100) | 437 reviews",
+        "kpi_score": 71.19,
+        "priority": "High"
+    }
+
+    4. python tests/test_pipeline.py --stage 4 --city Gurgaon (Stage 4 — Deduplication of 1 businesses)
+    Response: [INFO] [Dedup] 1/1 unique leads after dedup.
+
+    5. python tests/test_pipeline.py --stage 5 --city Gurgaon (Stage 5 — Contact enrichment for 1 leads)
+    Response:  
+
+
+
+
+
+
+
+
     3. python tests/test_pipeline.py --stage all --city Gurgaon
 
 Run all stages end-to-end:
@@ -71,14 +153,18 @@ import sys
 import logging
 from pathlib import Path
 
-# ── ensure project root is on sys.path ───────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# ── must come before ANY app.* import ────────────────────────────────────────
+ROOT_DIR = Path(__file__).resolve().parents[1]   # sugar_india_services/
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent / ".env")
+load_dotenv(ROOT_DIR / ".env")
 
-from database import AsyncSessionLocal
-import pipeline_stages as ps
+import app.services.openai_client  # noqa: registers AsyncOpenAI client
+from app.db.session import AsyncSessionLocal
+import app.pipelines.stages as ps
+from app.agents.bridge import run_stage2, run_stage5, run_stage7
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,66 +173,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pipeline_test")
 
+async def _call_agents_bridge(stage: int, businesses: list) -> dict:
+    """
+    Dispatches to the correct Python agent runner for the given pipeline stage.
+
+    Stage 2 → run_stage2  → Business Intelligence Agent  → {"businesses": [...]}
+    Stage 5 → run_stage5  → Contact Discovery Agent      → {"businesses": [...]}
+    Stage 7 → run_stage7  → Email Generator Agent        → {"emails": [...]}
+    """
+    logger.info(f"[Agents] Calling stage {stage} agent with {len(businesses)} business(es)")
+    if stage == 2:
+        return await run_stage2(businesses)
+    if stage == 5:
+        return await run_stage5(businesses)
+    if stage == 7:
+        return await run_stage7(businesses)
+    raise ValueError(f"Unknown agent stage: {stage}")
+
 
 # ─── MOCK DATA (used when --dry-run is set) ──────────────────────────────────
 MOCK_BUSINESSES = [
     {
-        "place_id":      "mock_001",
-        "business_name": "The Grand Bakery Gurgaon",
-        "address":       "DLF Cyber City, Gurgaon, Haryana",
-        "phone":         "+91-9876543210",
-        "website":       "https://grandbakery.in",
-        "rating":        4.5,
-        "reviews_count": 320,
-        "lat":           28.4595,
-        "lng":           77.0266,
-        "types":         ["bakery", "food"],
-        "segment":       "Bakery",
-        "city":          "Gurgaon",
-        "state":         "Haryana",
-        "tier":          1,
-        "num_outlets":   6,
-        "is_chain":      True,
-        "source":        "mock",
-    },
-    {
-        "place_id":      "mock_002",
-        "business_name": "Spice Route Restaurant",
-        "address":       "Sector 29, Gurgaon, Haryana",
-        "phone":         "+91-9123456789",
-        "website":       "https://spiceroute.com",
-        "rating":        4.2,
-        "reviews_count": 210,
-        "lat":           28.4700,
-        "lng":           77.0350,
-        "types":         ["restaurant"],
-        "segment":       "Restaurant",
-        "city":          "Gurgaon",
-        "state":         "Haryana",
-        "tier":          1,
-        "num_outlets":   3,
-        "is_chain":      False,
-        "source":        "mock",
-    },
-    {
-        "place_id":      "mock_003",
-        "business_name": "Brewer's Cafe & Desserts",
-        "address":       "Golf Course Road, Gurgaon, Haryana",
-        "phone":         "+91-9988776655",
-        "website":       "https://brewerscafe.in",
-        "rating":        4.6,
-        "reviews_count": 480,
-        "lat":           28.4400,
-        "lng":           77.1000,
-        "types":         ["cafe"],
-        "segment":       "Cafe",
-        "city":          "Gurgaon",
-        "state":         "Haryana",
-        "tier":          1,
-        "num_outlets":   12,
-        "is_chain":      True,
-        "source":        "mock",
-    },
+        "place_id": "ChIJL7-ALkoZDTkRhIFPFMUs1oE",
+        "business_name": "Theobroma Bakery and Cake Shop - Baani Square, Gurugram",
+        "address": "Shop No. G-6, Ground Floor, B Block A, Baani Square, Sector 50, Gurugram, Haryana 122018, India",
+        "phone": "+91 81828 81881",
+        "website": "https://order.theobroma.in",
+        "description": "",
+        "rating": 4.6,
+        "reviews_count": 437,
+        "lat": 28.4257079,
+        "lng": 77.05772809999999,
+        "types": ["bakery"],
+        "highlights": ["Great coffee","Great dessert","Great tea selection","Sports"],
+        "offerings": ["Coffee"],
+        "from_the_business": [],
+        "segment": "Bakery",
+        "city": "Gurugram",
+        "state": "Haryana",
+        "tier": 1,
+        "num_outlets": 1,
+        "is_chain": False,
+        "source": "serpapi_google_maps"
+    }
 ]
 
 
@@ -186,7 +255,30 @@ async def run_stage_1(city: str, dry_run: bool) -> list:
         result = result or MOCK_BUSINESSES          # fallback: return all mock data
     else:
         async with AsyncSessionLocal() as session:
-            result = await ps.extract_business_data(city, session)
+            # result = await ps.extract_business_data(city, session)
+            result = [{
+                "place_id": "ChIJL7-ALkoZDTkRhIFPFMUs1oE",
+                "business_name": "Theobroma Bakery and Cake Shop - Baani Square, Gurugram",
+                "address": "Shop No. G-6, Ground Floor, B Block A, Baani Square, Sector 50, Gurugram, Haryana 122018, India",
+                "phone": "+91 81828 81881",
+                "website": "https://order.theobroma.in",
+                "description": "",
+                "rating": 4.6,
+                "reviews_count": 437,
+                "lat": 28.4257079,
+                "lng": 77.05772809999999,
+                "types": ["bakery"],
+                "highlights": ["Great coffee","Great dessert","Great tea selection","Sports"],
+                "offerings": ["Coffee"],
+                "from_the_business": [],
+                "segment": "Bakery",
+                "city": "Gurugram",
+                "state": "Haryana",
+                "tier": 1,
+                "num_outlets": 1,
+                "is_chain": False,
+                "source": "serpapi_google_maps"
+            }]  # ensure it's a list, not None
     _print_result("Stage 1: Extracted", result)
     return result
 
@@ -207,8 +299,16 @@ async def run_stage_2(businesses: list, dry_run: bool) -> list:
             })
         result = businesses
     else:
-        async with AsyncSessionLocal() as session:
-            result = await ps.ai_process_business_data(businesses, session)
+        # ── Agentic flow: Business Intelligence Agent (Stage 2) ──────────────
+        print("  🤖 Calling Business Intelligence Agent directly ...")
+        try:
+            output = await _call_agents_bridge(2, businesses)
+            # output = await run_stage2(businesses)
+            result = output.get("businesses", businesses)
+        except Exception as exc:
+            logger.warning(f"[Agents] Bridge failed, falling back to Gemini: {exc}")
+            async with AsyncSessionLocal() as session:
+                result = await ps.ai_process_business_data(businesses, session)
     _print_result("Stage 2: AI Enriched", result)
     return result
 
@@ -246,8 +346,36 @@ async def run_stage_5(businesses: list, dry_run: bool) -> list:
             }]
         result = businesses
     else:
-        async with AsyncSessionLocal() as session:
-            result = await ps.enrich_contacts(businesses, session)
+        # Step 1: fetch SerpAPI snippets in Python (unchanged)
+        print("  🔍 Fetching search snippets via SerpAPI ...")
+        businesses_with_snippets = []
+        for biz in businesses:
+            name    = biz.get("business_name", "")
+            city    = biz.get("city", "")
+            segment = biz.get("segment", "Restaurant")
+            snippets = []
+            for role_query in ["F&B Manager", "Procurement Manager", "Owner"]:
+                try:
+                    query = f'"{name}" {city} {role_query} LinkedIn India'
+                    hits  = await ps._serp_search(query)
+                    snippets.extend(hits[:3])
+                except Exception:
+                    pass
+            logger.info(f"  → Retrieved contacts after SerpAPI Google search: {snippets}")
+            # Attach snippets so the bridge can pass them to the agent
+            businesses_with_snippets.append({**biz, "_serp_snippets": snippets})
+            logger.info(f"  → Attached snippets with business {businesses_with_snippets} snippets to '{name}' for agent processing.")
+
+        # Step 2: Contact Discovery Agent extracts the decision-maker
+        print("  🤖 Calling Contact Discovery Agent directly ...")
+        try:
+            output = await _call_agents_bridge(5, businesses_with_snippets)
+            # output = await run_stage5(businesses_with_snippets, dry_run=False)
+            result = output.get("businesses", businesses)
+        except Exception as exc:
+            logger.warning(f"[Agents] Bridge failed, falling back to Gemini: {exc}")
+            async with AsyncSessionLocal() as session:
+                result = await ps.enrich_contacts(businesses, session)
     _print_result("Stage 5: Contacts Enriched", result)
     return result
 
@@ -290,8 +418,17 @@ async def run_stage_7(businesses: list, dry_run: bool) -> list:
             "business": b,
         } for b in businesses]
     else:
-        async with AsyncSessionLocal() as session:
-            result = await ps.generate_personalized_emails(businesses, session)
+        # ── Agentic flow: Email Generator Agent (Stage 7) ────────────────────
+        print("  🤖 Calling Email Generator Agent directly ...")
+        try:
+            output = await _call_agents_bridge(7, businesses)
+            # output = await run_stage7(businesses, dry_run=False)
+
+            result = output.get("emails", [])
+        except Exception as exc:
+            logger.warning(f"[Agents] Bridge failed, falling back to Gemini: {exc}")
+            async with AsyncSessionLocal() as session:
+                result = await ps.generate_personalized_emails(businesses, session)
     _print_emails(result)
     return result
 
@@ -324,76 +461,15 @@ async def run_pipeline(city: str, stage: str, dry_run: bool):
     # Stage 2
     if stage in ("2", "all"):
         if stage == "2":
-            # businesses = MOCK_BUSINESSES
-            businesses = [{
-                "place_id": "ChIJ____P9yEXjkRUYF5jt1WDIk",
-                "business_name": "Baker's Den",
-                "address": "7, Shivalik Plaza, IIM Rd, opposite AMA, Panjara Pol, Ambawadi, Ahmedabad, Gujarat 380015",
-                "phone": "076994 54545",
-                "website": "https://www.thebakersden.com/",
-                "description": "",
-                "rating": 4.7,
-                "reviews_count": 302,
-                "lat": 23.028003599999998,
-                "lng": 72.5423191,
-                "highlights": [],
-                "from_the_business": [],
-                "segment": "Bakery",
-                "city": "Ahmedabad",
-                "state": "",
-                "tier": 1,
-                "num_outlets": 1,
-                "is_chain": False,
-                "source": "serpapi_google_maps"
-            }]
-        # businesses = await run_stage_2(businesses, dry_run)
-        businesses = await run_stage_2([{
-                "place_id": "ChIJ____P9yEXjkRUYF5jt1WDIk",
-                "business_name": "Baker's Den",
-                "address": "7, Shivalik Plaza, IIM Rd, opposite AMA, Panjara Pol, Ambawadi, Ahmedabad, Gujarat 380015",
-                "phone": "076994 54545",
-                "website": "https://www.thebakersden.com/",
-                "description": "",
-                "rating": 4.7,
-                "reviews_count": 302,
-                "lat": 23.028003599999998,
-                "lng": 72.5423191,
-                "highlights": [],
-                "from_the_business": [],
-                "segment": "Bakery",
-                "city": "Ahmedabad",
-                "state": "",
-                "tier": 1,
-                "num_outlets": 1,
-                "is_chain": False,
-                "source": "serpapi_google_maps"
-            }], dry_run)
+            businesses = MOCK_BUSINESSES
+        businesses = await run_stage_2(businesses, dry_run)
         if stage == "2":
             return
 
     # Stage 3
     if stage in ("3", "all"):
         if stage == "3":
-            # businesses = MOCK_BUSINESSES
-            businesses = [{
-                "place_id": "ChIJVVcsPJg9DTkRKOXisrZv2O4",
-                "business_name": "Under The Neem",
-                "address": "Karma Lakelands, Sector 80, Gurugram, Haryana 122012",
-                "phone": "096252 91720",
-                "website": "https://karmachalets.co.in/under-the-neem",
-                "rating": 4.4,
-                "reviews_count": 2897,
-                "lat": 28.3616052,
-                "lng": 76.958631,
-                "segment": "Restaurant",
-                "city": "Gurgaon",
-                "state": "",
-                "tier": 1,
-                "num_outlets": 1,
-                "is_chain": False,
-                "source": "serpapi_google_maps"
-                }]
-            businesses = await run_stage_2(businesses, dry_run=True)
+            businesses = MOCK_BUSINESSES
         businesses = await run_stage_3(businesses)
         if stage == "3":
             return
@@ -437,25 +513,7 @@ async def run_pipeline(city: str, stage: str, dry_run: bool):
     if stage in ("8", "all"):
         if stage == "8":
             # Bootstrap minimal email items for storage test
-            # businesses = MOCK_BUSINESSES
-            businesses = [{
-                "place_id": "ChIJVVcsPJg9DTkRKOXisrZv2O4",
-                "business_name": "Under The Neem",
-                "address": "Karma Lakelands, Sector 80, Gurugram, Haryana 122012",
-                "phone": "096252 91720",
-                "website": "https://karmachalets.co.in/under-the-neem",
-                "rating": 4.4,
-                "reviews_count": 2897,
-                "lat": 28.3616052,
-                "lng": 76.958631,
-                "segment": "Restaurant",
-                "city": "Gurgaon",
-                "state": "",
-                "tier": 1,
-                "num_outlets": 1,
-                "is_chain": False,
-                "source": "serpapi_google_maps"
-                }]
+            businesses = MOCK_BUSINESSES
             businesses = await run_stage_2(businesses, dry_run=True)
             businesses = await run_stage_3(businesses)
             businesses = await run_stage_4(businesses)
