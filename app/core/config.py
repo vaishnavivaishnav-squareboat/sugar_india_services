@@ -38,3 +38,14 @@ SMTP_PORT: int     = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER: str     = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM: str     = os.getenv("SMTP_FROM", "")  # "Dhampur Green <you@gmail.com>"
+
+# ── Snov.io (Stage 6 tertiary email enrichment) ───────────────────────────
+SNOV_CLIENT_ID:     str = os.getenv("SNOV_CLIENT_ID", "")
+SNOV_CLIENT_SECRET: str = os.getenv("SNOV_CLIENT_SECRET", "")
+
+# ── API URLS ───────────────────────────────────────────────────────────────
+APOLLO_PEOPLE_MATCH_URL: str = os.getenv("APOLLO_PEOPLE_MATCH_URL")
+SERP_ENDPOINT: str = os.getenv("SERP_ENDPOINT", "https://www.searchapi.io/api/v1/search")
+SNOV_TOKEN_URL: str  = os.getenv("SNOV_TOKEN_URL")
+SNOV_SEARCH_URL: str = os.getenv("SNOV_SEARCH_URL")
+SNOV_EMAIL_URL: str  = os.getenv("SNOV_EMAIL_URL")

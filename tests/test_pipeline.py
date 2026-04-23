@@ -161,11 +161,13 @@ if str(ROOT_DIR) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv(ROOT_DIR / ".env")
 
-import app.services.openai_client  # noqa: registers AsyncOpenAI client
+import app.core.openai_client  # noqa: registers AsyncOpenAI client
 from app.db.session import AsyncSessionLocal
 import app.pipelines.stages as ps
 from app.agents.bridge import run_stage2, run_stage5, run_stage7
-from app.helpers.constants import roles
+from app.core.constants import roles
+from app.providers.serpapi_provider import search_contact_signals
+from app.services.enrichment.contact_service import enrich_leads_contacts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -195,19 +197,19 @@ async def _call_agents_bridge(stage: int, businesses: list) -> dict:
 # ─── MOCK DATA (used when --dry-run is set) ──────────────────────────────────
 MOCK_BUSINESSES = [
     {
-        "place_id": "ChIJL7-ALkoZDTkRhIFPFMUs1oE",
-        "business_name": "Theobroma Bakery and Cake Shop - Baani Square, Gurugram",
-        "address": "Shop No. G-6, Ground Floor, B Block A, Baani Square, Sector 50, Gurugram, Haryana 122018, India",
-        "phone": "+91 81828 81881",
-        "website": "https://order.theobroma.in",
+        "place_id": "ChIJL7-ALkoZDTkRhIFPFMUs1oF",
+        "business_name": "Creme Castle",
+        "address": "Ground Floor, Shop, DLF City, Sikanderpur, DLF Phase 1, Sector 24, Gurugram, Haryana 122002, India",
+        "phone": "8588813880",
+        "website": "https://cremecastle.in",
         "description": "",
         "rating": 4.6,
-        "reviews_count": 437,
+        "reviews_count": 1498,
         "lat": 28.4257079,
         "lng": 77.05772809999999,
         "types": ["bakery"],
-        "highlights": ["Great coffee","Great dessert","Great tea selection","Sports"],
-        "offerings": ["Coffee"],
+        "highlights": ["cakes","Great dessert","sweets & treats","cheesecakes"],
+        "offerings": ["desserts"],
         "from_the_business": [],
         "segment": "Bakery",
         "city": "Gurugram",
@@ -229,9 +231,18 @@ def _print_result(stage_name: str, data: list):
     for item in data[:3]:     # print first 3 only
         simplified = {
             k: v for k, v in item.items()
-            if k not in ("types", "menu_categories", "contacts", "business")
+            if k not in ("types", "menu_categories", "business")
         }
+        # Print contacts as a sub-section for readability
+        contacts = item.get("contacts", [])
         print(json.dumps(simplified, indent=2, default=str))
+        if contacts:
+            print(f"  contacts ({len(contacts)}):")
+            for c in contacts:
+                print(f"    [{'★' if c.get('is_primary') else ' '}] "
+                      f"{c.get('name','?'):30s} | {c.get('role',''):40s} | "
+                      f"email: {c.get('email') or '—':35s} | "
+                      f"src: {c.get('source','?')}")
     if len(data) > 3:
         print(f"  ... and {len(data) - 3} more")
 
@@ -240,10 +251,11 @@ def _print_emails(emails: list):
     print(f"\n{'═'*60}")
     print(f"  Stage 7 – Generated Emails  →  {len(emails)} email(s)")
     print(f"{'═'*60}")
-    for e in emails[:2]:
-        print(f"\nTo   : {e.get('lead_name')} ({e.get('lead_city')})")
+    for e in emails:
+        print(f"\nTo   : {e.get('sent_to_name', e.get('lead_name'))} <{e.get('sent_to_email', '')}>")
         print(f"Subj : {e.get('subject')}")
-        print(f"Body :\n{e.get('body', '')[:400]}...")
+        print(f"Body :\n{e.get('body', '')[:300]}...")
+        print(f"{'─'*60}")
 
 
 # ─── STAGE RUNNERS ───────────────────────────────────────────────────────────
@@ -257,29 +269,7 @@ async def run_stage_1(city: str, dry_run: bool) -> list:
     else:
         async with AsyncSessionLocal() as session:
             # result = await ps.extract_business_data(city, session)
-            result = [{
-                "place_id": "ChIJL7-ALkoZDTkRhIFPFMUs1oE",
-                "business_name": "Theobroma Bakery and Cake Shop - Baani Square, Gurugram",
-                "address": "Shop No. G-6, Ground Floor, B Block A, Baani Square, Sector 50, Gurugram, Haryana 122018, India",
-                "phone": "+91 81828 81881",
-                "website": "https://order.theobroma.in",
-                "description": "",
-                "rating": 4.6,
-                "reviews_count": 437,
-                "lat": 28.4257079,
-                "lng": 77.05772809999999,
-                "types": ["bakery"],
-                "highlights": ["Great coffee","Great dessert","Great tea selection","Sports"],
-                "offerings": ["Coffee"],
-                "from_the_business": [],
-                "segment": "Bakery",
-                "city": "Gurugram",
-                "state": "Haryana",
-                "tier": 1,
-                "num_outlets": 1,
-                "is_chain": False,
-                "source": "serpapi_google_maps"
-            }]  # ensure it's a list, not None
+            result = MOCK_BUSINESSES
     _print_result("Stage 1: Extracted", result)
     return result
 
@@ -304,10 +294,9 @@ async def run_stage_2(businesses: list, dry_run: bool) -> list:
         print("  🤖 Calling Business Intelligence Agent directly ...")
         try:
             output = await _call_agents_bridge(2, businesses)
-            # output = await run_stage2(businesses)
             result = output.get("businesses", businesses)
         except Exception as exc:
-            logger.warning(f"[Agents] Bridge failed, falling back to Gemini: {exc}")
+            logger.info(f"[Agents] Bridge failed, falling back to service layer: {exc}")
             async with AsyncSessionLocal() as session:
                 result = await ps.ai_process_business_data(businesses, session)
     _print_result("Stage 2: AI Enriched", result)
@@ -347,37 +336,29 @@ async def run_stage_5(businesses: list, dry_run: bool) -> list:
             }]
         result = businesses
     else:
-        # Step 1: fetch SerpAPI snippets in Python (unchanged)
-        print("  🔍 Fetching search snippets via SerpAPI ...")
+        # Step 1: fetch SERP snippets using the centralised search_contact_signals
+        # (builds the same site:linkedin.com/in OR-roles query as contact_service)
+        print("  🔍 Fetching LinkedIn snippets via search_contact_signals ...")
         businesses_with_snippets = []
         for biz in businesses:
-            name    = biz.get("business_name", "")
-            city    = biz.get("city", "")
-            segment = biz.get("segment", "Restaurant")
-            snippets = []
-            
-            for role_query in roles:
-                try:
-                    query = f'"{name}" {city} {role_query} LinkedIn India'
-                    hits  = await ps._serp_search(query)
-                    snippets.extend(hits[:3])
-                except Exception:
-                    pass
-            logger.info(f"  → Retrieved contacts after SerpAPI Google search: {snippets}")
-            # Attach snippets so the bridge can pass them to the agent
+            name = biz.get("business_name", "")
+            city = biz.get("city", "")
+            snippets = await search_contact_signals(
+                business_name=name,
+                city=city,
+                roles=roles,
+            )
+            logger.info(f"  → {len(snippets)} snippet(s) retrieved for '{name}', here ---->{snippets}")
             businesses_with_snippets.append({**biz, "_serp_snippets": snippets})
-            logger.info(f"  → Attached snippets with business {businesses_with_snippets} snippets to '{name}' for agent processing.")
 
         # Step 2: Contact Discovery Agent extracts the decision-maker
-        print("  🤖 Calling Contact Discovery Agent directly ...")
+        print("  🤖 Calling Contact Discovery Agent ...")
         try:
             output = await _call_agents_bridge(5, businesses_with_snippets)
-            # output = await run_stage5(businesses_with_snippets, dry_run=False)
             result = output.get("businesses", businesses)
         except Exception as exc:
-            logger.warning(f"[Agents] Bridge failed, falling back to Gemini: {exc}")
-            async with AsyncSessionLocal() as session:
-                result = await ps.enrich_contacts(businesses, session)
+            logger.info(f"[Agents] Bridge failed, falling back to enrich_leads_contacts: {exc}")
+            result = await enrich_leads_contacts(businesses)
     _print_result("Stage 5: Contacts Enriched", result)
     return result
 
@@ -420,17 +401,10 @@ async def run_stage_7(businesses: list, dry_run: bool) -> list:
             "business": b,
         } for b in businesses]
     else:
-        # ── Agentic flow: Email Generator Agent (Stage 7) ────────────────────
-        print("  🤖 Calling Email Generator Agent directly ...")
-        try:
-            output = await _call_agents_bridge(7, businesses)
-            # output = await run_stage7(businesses, dry_run=False)
-
-            result = output.get("emails", [])
-        except Exception as exc:
-            logger.warning(f"[Agents] Bridge failed, falling back to Gemini: {exc}")
-            async with AsyncSessionLocal() as session:
-                result = await ps.generate_personalized_emails(businesses, session)
+        # Use the service layer which generates one email per contact-with-email
+        print("  📨 Generating personalised email for every contact with an email address ...")
+        async with AsyncSessionLocal() as session:
+            result = await ps.generate_personalized_emails(businesses, session)
     _print_emails(result)
     return result
 
@@ -451,77 +425,118 @@ async def run_pipeline(city: str, stage: str, dry_run: bool):
     print(f"  Mode: {'🏜  Dry-run (mock data, no real API calls)' if dry_run else '🌐  Live (real API calls)'}")
     print(f"{'━'*60}")
 
-    # Stage 1
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 1 – DATA EXTRACTION - Extraction of businesses from SERPAPI/SEARCHAPI based on city and segment keywords
+# ══════════════════════════════════════════════════════════════════════════════
+
     if stage in ("1", "all"):
         businesses = await run_stage_1(city, dry_run)
+        # businesses = MOCK_BUSINESSES
         if not businesses:
             print("\n⚠️  No businesses found. Check SERP_API_KEY or use --dry-run.")
             return
         if stage == "1":
             return
 
-    # Stage 2
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 2 – AI CLASSIFICATION - AI enrichment (Business Intelligence Agent - sugar estimates, etc)
+# ══════════════════════════════════════════════════════════════════════════════
+
     if stage in ("2", "all"):
         if stage == "2":
             businesses = MOCK_BUSINESSES
+            businesses = await run_stage_1(city, dry_run=False)
         businesses = await run_stage_2(businesses, dry_run)
         if stage == "2":
             return
 
-    # Stage 3
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 3 – KPI FILTERING
+# ══════════════════════════════════════════════════════════════════════════════
     if stage in ("3", "all"):
         if stage == "3":
             businesses = MOCK_BUSINESSES
+            businesses = await run_stage_1(city, dry_run=False)
+            businesses = await run_stage_2(businesses, dry_run=False)
         businesses = await run_stage_3(businesses)
         if stage == "3":
             return
 
-    # Stage 4
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 4 – DEDUPLICATION
+# ══════════════════════════════════════════════════════════════════════════════
     if stage in ("4", "all"):
         if stage == "4":
             businesses = MOCK_BUSINESSES
+            businesses = await run_stage_1(city, dry_run=False)
+            businesses = await run_stage_2(businesses, dry_run=False)
+            businesses = await run_stage_3(businesses)
         businesses = await run_stage_4(businesses)
         if stage == "4":
             return
 
-    # Stage 5
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 5 – CONTACT ENRICHMENT - including LinkedIn snippets retrieval
+# ══════════════════════════════════════════════════════════════════════════════
+
     if stage in ("5", "all"):
         if stage == "5":
             businesses = MOCK_BUSINESSES
+            businesses = await run_stage_1(city, dry_run=False)
+            businesses = await run_stage_2(businesses, dry_run=False)
+            businesses = await run_stage_3(businesses)
+            businesses = await run_stage_4(businesses)
         businesses = await run_stage_5(businesses, dry_run)
         if stage == "5":
             return
 
-    # Stage 6
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 6 – EMAIL FINDING/ENRICHMENT - finding email addresses for the discovered contacts + using business domain
+# ══════════════════════════════════════════════════════════════════════════════
     if stage in ("6", "all"):
         if stage == "6":
             businesses = MOCK_BUSINESSES
-            businesses = await run_stage_5(businesses, dry_run=True)
+            businesses = await run_stage_1(city, dry_run=False)
+            businesses = await run_stage_2(businesses, dry_run=False)
+            businesses = await run_stage_3(businesses)
+            businesses = await run_stage_4(businesses)
+            businesses = await run_stage_5(businesses, dry_run=False)
         businesses = await run_stage_6(businesses, dry_run)
         if stage == "6":
             return
 
-    # Stage 7
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 7 – PERSONALIZED EMAIL GENERATION
+# ══════════════════════════════════════════════════════════════════════════════
     if stage in ("7", "all"):
         if stage == "7":
             businesses = MOCK_BUSINESSES
-            businesses = await run_stage_5(businesses, dry_run=True)
-            businesses = await run_stage_6(businesses, dry_run=True)
+            businesses = await run_stage_1(city, dry_run=False)
+            businesses = await run_stage_2(businesses, dry_run=False)
+            businesses = await run_stage_3(businesses)
+            businesses = await run_stage_4(businesses)
+            businesses = await run_stage_5(businesses, dry_run=False)
+            businesses = await run_stage_6(businesses, dry_run=False)
         email_items = await run_stage_7(businesses, dry_run)
         if stage == "7":
             return
 
-    # Stage 8
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 8 – STORAGE - Store leads and emails to DB
+# ══════════════════════════════════════════════════════════════════════════════
+
     if stage in ("8", "all"):
         if stage == "8":
             # Bootstrap minimal email items for storage test
             businesses = MOCK_BUSINESSES
-            businesses = await run_stage_2(businesses, dry_run=True)
+            businesses = await run_stage_1(city, dry_run=False)
+            businesses = await run_stage_2(businesses, dry_run=False)
             businesses = await run_stage_3(businesses)
             businesses = await run_stage_4(businesses)
-            businesses = await run_stage_5(businesses, dry_run=True)
-            businesses = await run_stage_6(businesses, dry_run=True)
-            email_items = await run_stage_7(businesses, dry_run=True)
+            businesses = await run_stage_5(businesses, dry_run=False)
+            businesses = await run_stage_6(businesses, dry_run=False)
+            email_items = await run_stage_7(businesses, dry_run=False)
         await run_stage_8(email_items)
 
     print(f"\n{'━'*60}")

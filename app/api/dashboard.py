@@ -89,6 +89,12 @@ async def get_dashboard_stats():
     }
 
 
+@dashboard_router.post("/seed-mock-data")
+async def seed_mock_data():
+    """No-op stub — mock data seeding is disabled. Returns success for frontend compatibility."""
+    return {"message": "Seed skipped (disabled)", "count": 0}
+
+
 # @dashboard_router.post("/seed-mock-data")
 # async def seed_mock_data():
 #     async with AsyncSessionLocal() as session:

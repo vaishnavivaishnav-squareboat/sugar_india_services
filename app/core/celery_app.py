@@ -173,7 +173,7 @@ async def _async_pipeline():
             logs = pipeline_run.logs or {}
             logs["error"] = str(exc)
             pipeline_run.logs = logs
-            logger.error(f"[Pipeline] City '{city.name}' failed: {exc}", exc_info=True)
+            logger.info(f"[Pipeline] City '{city.name}' failed: {exc}", exc_info=True)
 
         await session.commit()
         await _update_city_last_processed(session, city.id)
@@ -196,7 +196,7 @@ class CityPipelineTask(celery.Task):
         try:
             asyncio.run(_async_pipeline())
         except Exception as exc:
-            logger.error(f"[CityPipelineTask] Failed: {exc}", exc_info=True)
+            logger.info(f"[CityPipelineTask] Failed: {exc}", exc_info=True)
             raise self.retry(exc=exc)
 
 

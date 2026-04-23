@@ -15,11 +15,11 @@ from app.db.session import AsyncSessionLocal, celery_session
 from app.db.orm import Lead, Contact, OutreachEmail
 from app.utils import model_to_dict
 from app.utils.smtp import send_email
-from app.services.openai_client import client as openai_client
+from app.core.openai_client import client as openai_client
 from app.core.config import OPENAI_MODEL
 from app.core.constants import LeadStatus, EmailStatus, EmailType
-from app.prompts.lead_email_api import lead_email_api_prompt
-from app.prompts.follow_up_email import follow_up_email_prompt
+from app.agents.prompts.lead_email_api import lead_email_api_prompt
+from app.agents.prompts.follow_up_email import follow_up_email_prompt
 
 outreach_router = APIRouter(prefix="/outreach")
 

@@ -23,7 +23,7 @@ def log_agent_flow(new_items: list[Any]) -> None:
     Args:
         new_items: result.new_items from Runner.run()
     """
-    logger.debug("\n[FLOW] ── Agent execution flow ──")
+    logger.info("\n[FLOW] ── Agent execution flow ──")
     for i, item in enumerate(new_items, start=1):
         step      = f"[FLOW] Step {i}"
         item_type = getattr(item, "type", "") or type(item).__name__
@@ -32,19 +32,19 @@ def log_agent_flow(new_items: list[Any]) -> None:
             agent_name  = getattr(getattr(item, "agent", None), "name", "?")
             raw         = getattr(item, "raw_item", None)
             target_name = getattr(raw, "name", "?") if raw else "?"
-            logger.debug(f"{step}: 🔀 {agent_name} triggered handoff → {target_name}")
+            logger.info(f"{step}: 🔀 {agent_name} triggered handoff → {target_name}")
 
         elif "handoff_output" in item_type:
             src = getattr(getattr(item, "source_agent", None), "name", "?")
             tgt = getattr(getattr(item, "target_agent", None), "name", "?")
-            logger.debug(f"{step}: ✅ Handoff complete  {src} → {tgt}")
+            logger.info(f"{step}: ✅ Handoff complete  {src} → {tgt}")
 
         elif "tool_call_item" == item_type or "tool_call" in item_type and "output" not in item_type:
             agent_name = getattr(getattr(item, "agent", None), "name", "?")
             raw        = getattr(item, "raw_item", None)
             tool_name  = getattr(raw, "name", "?") if raw else "?"
             args       = getattr(raw, "arguments", "{}") if raw else "{}"
-            logger.debug(f"{step}: 🔧 {agent_name} called tool '{tool_name}' with {args[:120]}")
+            logger.info(f"{step}: 🔧 {agent_name} called tool '{tool_name}' with {args[:120]}")
 
         elif "tool_call_output" in item_type:
             agent_name = getattr(getattr(item, "agent", None), "name", "?")
@@ -56,7 +56,7 @@ def log_agent_flow(new_items: list[Any]) -> None:
                     out = output[:80]
                 elif hasattr(output, "text"):
                     out = (output.text or "")[:80]
-            logger.debug(f"{step}: 📦 {agent_name} got tool result → '{out}'")
+            logger.info(f"{step}: 📦 {agent_name} got tool result → '{out}'")
 
         elif "message_output" in item_type:
             agent_name = getattr(getattr(item, "agent", None), "name", "?")
@@ -68,13 +68,13 @@ def log_agent_flow(new_items: list[Any]) -> None:
                     text = getattr(content[0], "text", "")[:80]
                 elif isinstance(content, str):
                     text = content[:80]
-            logger.debug(f"{step}: 💬 {agent_name} responded → '{text}...'")
+            logger.info(f"{step}: 💬 {agent_name} responded → '{text}...'")
 
         else:
             agent_name = getattr(getattr(item, "agent", None), "name", "unknown")
-            logger.debug(f"{step}: ❓ {item_type} (agent: {agent_name})")
+            logger.info(f"{step}: ❓ {item_type} (agent: {agent_name})")
 
-    logger.debug("[FLOW] ────────────────────────")
+    logger.info("[FLOW] ────────────────────────")
 
 
 def extract_agent_chain(new_items: list[Any]) -> list[str]:

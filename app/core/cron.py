@@ -146,7 +146,7 @@ async def run_pipeline_for_city(city: City, dry_run: bool = False) -> dict:
             logger.info(f"  Stage 1 ✓  →  {len(raw)} businesses extracted")
 
             if not raw:
-                logger.warning(f"  Stage 1 returned 0 results for {city_name!r} — aborting.")
+                logger.info(f"  Stage 1 returned 0 results for {city_name!r} — aborting.")
                 run.status = "completed"
                 run.completed_at = datetime.now(timezone.utc)
                 await session.commit()
@@ -251,7 +251,7 @@ async def run_pipeline_for_city(city: City, dry_run: bool = False) -> dict:
             run.logs = logs
             await session.commit()
             summary["error"] = str(exc)
-            logger.error(f"  ✗ Pipeline failed for {city_name!r}: {exc}", exc_info=True)
+            logger.info(f"  ✗ Pipeline failed for {city_name!r}: {exc}", exc_info=True)
 
         finally:
             await _mark_city_processed(session, city)
@@ -280,7 +280,7 @@ async def main(city_override: str = None, dry_run: bool = False):
             if city_override
             else "No active cities configured. Add cities via the admin panel."
         )
-        logger.warning(f"  ⚠️  {msg}")
+        logger.info(f"  ⚠️  {msg}")
         return
 
     logger.info(f"  Cities to process: {[c.name for c in cities]}")

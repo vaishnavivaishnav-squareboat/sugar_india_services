@@ -25,12 +25,11 @@ from app.schemas.lead import BulkCreateRequest, DiscoverRequest, LeadCreate, Lea
 from app.utils.scoring import make_lead_obj
 from app.utils import model_to_dict
 import app.pipelines.stages as ps
-from app.pipelines.stages import SERP_API_KEY as _SERP_API_KEY
 from app.db.orm import Lead, City, Segment, OutreachEmail, Contact
-from app.prompts.lead_qualify   import lead_qualify_prompt
-from app.prompts.lead_email_api import lead_email_api_prompt
-from app.services.openai_client import client as openai_client
-from app.core.config import OPENAI_MODEL
+from app.agents.prompts.lead_qualify   import lead_qualify_prompt
+from app.agents.prompts.lead_email_api import lead_email_api_prompt
+from app.core.openai_client import client as openai_client
+from app.core.config import OPENAI_MODEL, SERP_API_KEY as _SERP_API_KEY
 from app.core.constants import EmailStatus
 
 logger = logging.getLogger(__name__)
@@ -50,6 +49,8 @@ async def get_leads(
     status: Optional[str] = None,
     min_score: Optional[int] = None,
     search: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     limit: int = 100,
     skip: int = 0,
 ):
@@ -72,6 +73,21 @@ async def get_leads(
         if min_score is not None:
             stmt       = stmt.where(Lead.ai_score >= min_score)
             count_stmt = count_stmt.where(Lead.ai_score >= min_score)
+        if date_from:
+            try:
+                df = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                stmt       = stmt.where(Lead.created_at >= df)
+                count_stmt = count_stmt.where(Lead.created_at >= df)
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                # include the entire end day
+                dt = datetime.strptime(date_to, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+                stmt       = stmt.where(Lead.created_at <= dt)
+                count_stmt = count_stmt.where(Lead.created_at <= dt)
+            except ValueError:
+                pass
         if search:
             sf = or_(
                 Lead.business_name.ilike(f"%{search}%"),
@@ -79,6 +95,11 @@ async def get_leads(
             )
             stmt       = stmt.where(sf)
             count_stmt = count_stmt.where(sf)
+
+        # Only show leads that have at least one contact
+        has_contact = select(Contact.lead_id).where(Contact.lead_id == Lead.id).exists()
+        stmt       = stmt.where(has_contact)
+        count_stmt = count_stmt.where(has_contact)
 
         total = (await session.execute(count_stmt)).scalar() or 0
         lead_rows = (await session.execute(
@@ -462,10 +483,10 @@ async def discover_leads(req: DiscoverRequest):
             logger.info(f"[DISCOVER] Returning {len(results)} leads")
             return results
         except Exception as exc:
-            logger.error(f"[DISCOVER] Pipeline failed: {exc}", exc_info=True)
+            logger.info(f"[DISCOVER] Pipeline failed: {exc}", exc_info=True)
             return []
 
-    logger.warning("[DISCOVER] SERP_API_KEY not configured — returning empty results")
+    logger.info("[DISCOVER] SERP_API_KEY not configured — returning empty results")
     return []
 
 
@@ -598,7 +619,7 @@ async def qualify_lead_ai(lead_id: str):
         return {"lead": updated, "ai_analysis": ai_data}
 
     except Exception as e:
-        logger.error(f"AI qualify error: {e}")
+        logger.info(f"AI qualify error: {e}")
         raise HTTPException(status_code=500, detail=f"AI qualification failed: {str(e)}")
 
 
@@ -717,5 +738,5 @@ async def generate_email(lead_id: str):
                 return model_to_dict(new_email)
 
     except Exception as e:
-        logger.error(f"Email gen error: {e}")
+        logger.info(f"Email gen error: {e}")
         raise HTTPException(status_code=500, detail=f"Email generation failed: {str(e)}")

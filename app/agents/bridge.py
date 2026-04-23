@@ -23,11 +23,9 @@ import logging
 import sys
 
 # ── CRITICAL: register OpenAI client before any agent imports ─────────────────
-import app.services.openai_client  # noqa: F401
-
-from app.agents.runners.run_classify import classify_business_runner
-from app.agents.runners.run_contacts import discover_contact
-from app.agents.runners.run_email import generate_outreach_email
+from app.agents.classify_agent import classify_business_runner
+from app.agents.contact_agent import discover_contact
+from app.agents.email_agent import generate_outreach_email
 from app.core.constants import EmailStatus
 
 logger = logging.getLogger(__name__)
@@ -63,7 +61,7 @@ async def run_stage2(businesses: list[dict]) -> dict:
                 "ai_reasoning":                 analysis.get("ai_reasoning",                 ""),
             })
         except Exception as exc:
-            logger.error(f"[bridge] Stage 2 error for '{biz.get('business_name')}': {exc}")
+            logger.info(f"[bridge] Stage 2 error for '{biz.get('business_name')}': {exc}")
             results.append({
                 **biz,
                 "has_dessert_menu":          biz.get("segment") in ("Bakery", "Cafe"),
@@ -114,7 +112,7 @@ async def run_stage5(businesses: list[dict]) -> dict:
                 enriched["contacts"] = biz.get("contacts", [])
             results.append(enriched)
         except Exception as exc:
-            logger.error(f"[bridge] Stage 5 error for '{biz.get('business_name')}': {exc}")
+            logger.info(f"[bridge] Stage 5 error for '{biz.get('business_name')}': {exc}")
             fallback = {k: v for k, v in biz.items() if k != "_serp_snippets"}
             results.append(fallback)
         await asyncio.sleep(0.3)
@@ -144,7 +142,7 @@ async def run_stage7(businesses: list[dict]) -> dict:
                 "business":     biz,
             })
         except Exception as exc:
-            logger.error(f"[bridge] Stage 7 error for '{biz.get('business_name')}': {exc}")
+            logger.info(f"[bridge] Stage 7 error for '{biz.get('business_name')}': {exc}")
             emails.append({
                 "lead_name":    biz.get("business_name"),
                 "lead_city":    biz.get("city"),
@@ -163,28 +161,28 @@ async def run_stage7(businesses: list[dict]) -> dict:
 # Backward-compatible with test_pipeline.py subprocess usage
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _cli_main() -> None:
-    raw   = sys.stdin.read()
-    input_data = json.loads(raw)
-    stage      = input_data.get("stage")
-    businesses = input_data.get("businesses", [])
+# async def _cli_main() -> None:
+#     raw   = sys.stdin.read()
+#     input_data = json.loads(raw)
+#     stage      = input_data.get("stage")
+#     businesses = input_data.get("businesses", [])
 
-    if not businesses:
-        sys.stdout.write(json.dumps({"businesses": [], "emails": []}))
-        return
+#     if not businesses:
+#         sys.stdout.write(json.dumps({"businesses": [], "emails": []}))
+#         return
 
-    if stage == 2:
-        output = await run_stage2(businesses)
-    elif stage == 5:
-        output = await run_stage5(businesses)
-    elif stage == 7:
-        output = await run_stage7(businesses)
-    else:
-        raise ValueError(f"Unknown stage: {stage}")
+#     if stage == 2:
+#         output = await run_stage2(businesses)
+#     elif stage == 5:
+#         output = await run_stage5(businesses)
+#     elif stage == 7:
+#         output = await run_stage7(businesses)
+#     else:
+#         raise ValueError(f"Unknown stage: {stage}")
 
-    sys.stdout.write(json.dumps(output))
+#     sys.stdout.write(json.dumps(output))
 
 
-if __name__ == "__main__":
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
-    asyncio.run(_cli_main())
+# if __name__ == "__main__":
+#     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+#     asyncio.run(_cli_main())
