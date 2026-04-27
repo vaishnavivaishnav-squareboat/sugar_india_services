@@ -1,58 +1,32 @@
 version: "3.9"
 
 services:
-  # ── PostgreSQL ──────────────────────────────────────────────────────────────
-  # db:
-  #   image: postgres:16-alpine
-  #   restart: unless-stopped
-  #   environment:
-  #     POSTGRES_USER: horeca
-  #     POSTGRES_PASSWORD: horeca
-  #     POSTGRES_DB: horeca
-  #   volumes:
-  #     - postgres_data:/var/lib/postgresql/data
-  #   ports:
-  #     - "5432:5432"
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U horeca"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
-
-  # ── Redis (Celery broker + backend) ─────────────────────────────────────────
+  # ── Redis ──────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: horeca-redis
     restart: unless-stopped
-    # ports:
-    #   - '6379:6379'
+    ports:
+      - "6379:6379"
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
       - horeca-network
 
-  # ── FastAPI ─────────────────────────────────────────────────────────────────
+  # ── FastAPI ───────────────────────────────────────────────────────────
   api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: horeca-api
     ports:
-      - "8001:8001"   
+      - "8001:8001"
     env_file: .env
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
-      CELERY_BACKEND_URL: ${CELERY_BACKEND_URL}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./logs:/app/logs
     depends_on:
@@ -61,8 +35,14 @@ services:
     networks:
       - horeca-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
-  # ── Celery Worker ───────────────────────────────────────────────────────────
+  # ── Celery Worker ─────────────────────────────────────────────────────
   worker:
     build:
       context: .
@@ -70,10 +50,8 @@ services:
     container_name: horeca-worker
     command: celery -A app.core.celery_app worker --loglevel=info --concurrency=2
     env_file: .env
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
-      CELERY_BACKEND_URL: ${CELERY_BACKEND_URL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
@@ -82,10 +60,8 @@ services:
     networks:
       - horeca-network
     restart: unless-stopped
-    healthcheck:
-      test: ['CMD-SHELL', 'exit 0']
 
-  # ── Celery Beat ─────────────────────────────────────────────────────────────
+  # ── Celery Beat ───────────────────────────────────────────────────────
   beat:
     build:
       context: .
@@ -93,21 +69,14 @@ services:
     container_name: horeca-beat
     command: celery -A app.core.celery_app beat --loglevel=info
     env_file: .env
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
-      CELERY_BACKEND_URL: ${CELERY_BACKEND_URL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - horeca-network
     restart: unless-stopped
-    healthcheck:
-      test: ['CMD-SHELL', 'exit 0']
-
-volumes:
-  redis_data:
 
 networks:
   horeca-network:
