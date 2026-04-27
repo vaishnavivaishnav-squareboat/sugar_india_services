@@ -44,3 +44,4 @@ openpyxl>=3.1.0
 openai>=2.0.0
 openai-agents>=0.13.0
 pyhunter>=2.1.0
+ulid-py
