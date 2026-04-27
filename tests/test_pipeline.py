@@ -197,19 +197,51 @@ async def _call_agents_bridge(stage: int, businesses: list) -> dict:
 # ─── MOCK DATA (used when --dry-run is set) ──────────────────────────────────
 MOCK_BUSINESSES = [
     {
-        "place_id": "ChIJL7-ALkoZDTkRhIFPFMUs1oF",
-        "business_name": "Creme Castle",
-        "address": "Ground Floor, Shop, DLF City, Sikanderpur, DLF Phase 1, Sector 24, Gurugram, Haryana 122002, India",
-        "phone": "8588813880",
-        "website": "https://cremecastle.in",
+        "place_id": "ChIJl1Hw7h4ZDTkR2DrfIpwcH0M",
+        "business_name": "CAKE ‘O’ CLOCKS - TEST",
+        "address": "Shop no. 5, Plot-55, Mehrauli-Gurgaon Rd, Block C, Sukhrali, Sector 17, Gurugram, Haryana 122007, India",
+        "phone": "7042852897",
+        "website": "https://www.cakeoclocks.com",
         "description": "",
-        "rating": 4.6,
-        "reviews_count": 1498,
-        "lat": 28.4257079,
-        "lng": 77.05772809999999,
-        "types": ["bakery"],
+        "rating": 4.1,
+        "reviews_count": 141,
+        "lat": 28.4754789,
+        "lng": 77.0616746,
+        "types": [
+            "Bakery",
+            "Cake shop",
+            "Cupcake shop",
+            "Dessert shop",
+            "Patisserie"
+        ],
         "highlights": ["cakes","Great dessert","sweets & treats","cheesecakes"],
         "offerings": ["desserts"],
+        "from_the_business": [],
+        "segment": "Bakery",
+        "city": "Gurugram",
+        "state": "Haryana",
+        "tier": 1,
+        "num_outlets": 1,
+        "is_chain": False,
+        "source": "serpapi_google_maps"
+    },
+    {
+        "place_id": "ChIJHyro7KYZDTkRBa7PICK2gow",
+        "business_name": "De Cakery - TEST",
+        "address": "Shop 201, De Cakery, South point mall, Golf Course Rd, DLF Phase 5, Sector 53, Gurugram, Haryana 122011, India",
+        "phone": "8800339207",
+        "website": "http://www.decakery.com",
+        "description": "",
+        "rating": 4.7,
+        "reviews_count": 328,
+        "lat": 28.4482162,
+        "lng": 77.09899109999999,
+        "types": [
+            "Cake shop",
+            "Cafe"
+        ],
+        "highlights": ["Great coffee","Great dessert","Great tea selection","Sports"],
+        "offerings": ["Coffee"],
         "from_the_business": [],
         "segment": "Bakery",
         "city": "Gurugram",
@@ -518,6 +550,20 @@ async def run_pipeline(city: str, stage: str, dry_run: bool):
             businesses = await run_stage_4(businesses)
             businesses = await run_stage_5(businesses, dry_run=False)
             businesses = await run_stage_6(businesses, dry_run=False)
+
+        # Filter to only businesses that have at least one contact with an email
+        businesses_with_email = [
+            b for b in businesses
+            if any(c.get("email") for c in b.get("contacts", []))
+        ]
+        skipped = len(businesses) - len(businesses_with_email)
+        if skipped:
+            print(f"\n⏭  {skipped} business(es) skipped — no email addresses found after Stage 6")
+        if not businesses_with_email:
+            print("⚠️  No businesses have contacts with emails — skipping Stage 7 & 8.")
+            return
+        businesses = businesses_with_email
+
         email_items = await run_stage_7(businesses, dry_run)
         if stage == "7":
             return
@@ -544,7 +590,108 @@ async def run_pipeline(city: str, stage: str, dry_run: bool):
     print(f"{'━'*60}\n")
 
 
-# ─── CLI ─────────────────────────────────────────────────────────────────────
+# ─── PER-BUSINESS PIPELINE ────────────────────────────────────────────────────
+# Runs Stage 1 once, then for each extracted business independently runs
+# Stages 2 → 8 before moving on to the next business.
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def run_pipeline_per_business(city: str, dry_run: bool):
+    print(f"\n{'━'*60}")
+    print(f"  HORECA Pipeline  |  Mode: per-business  |  City: {city}")
+    print(f"  Mode: {'🏜  Dry-run (mock data)' if dry_run else '🌐  Live (real API calls)'}")
+    print(f"{'━'*60}")
+
+    # ── Stage 1: extract the full business list once ──────────────────────────
+    businesses = await run_stage_1(city, dry_run)
+    if not businesses:
+        print("\n⚠️  No businesses found. Check SERP_API_KEY or use --dry-run.")
+        return
+
+    total = len(businesses)
+    print(f"\n▶  Processing {total} business(es) one by one through Stages 2–8…\n")
+
+    all_email_items: list = []
+
+    for idx, business in enumerate(businesses, start=1):
+        bname = business.get("business_name", f"business #{idx}")
+        print(f"\n{'─'*60}")
+        print(f"  [{idx}/{total}]  {bname}")
+        print(f"{'─'*60}")
+
+        batch = [business]   # single-item list for all stage runners
+
+        # Stage 2 – AI classification
+        try:
+            batch = await run_stage_2(batch, dry_run)
+        except Exception as exc:
+            print(f"  ⚠  Stage 2 failed for '{bname}': {exc} — skipping")
+            continue
+
+        # Stage 3 – KPI filtering (may return empty list if filtered out)
+        try:
+            batch = await run_stage_3(batch)
+        except Exception as exc:
+            print(f"  ⚠  Stage 3 failed for '{bname}': {exc} — skipping")
+            continue
+        if not batch:
+            print(f"  ⏭  '{bname}' filtered out by KPI check — skipping")
+            continue
+
+        # Stage 4 – Deduplication
+        try:
+            batch = await run_stage_4(batch)
+        except Exception as exc:
+            print(f"  ⚠  Stage 4 failed for '{bname}': {exc} — skipping")
+            continue
+        if not batch:
+            print(f"  ⏭  '{bname}' already in DB (duplicate) — skipping")
+            continue
+
+        # Stage 5 – Contact enrichment
+        try:
+            batch = await run_stage_5(batch, dry_run)
+        except Exception as exc:
+            print(f"  ⚠  Stage 5 failed for '{bname}': {exc} — skipping")
+            continue
+
+        # Stage 6 – Email enrichment
+        try:
+            batch = await run_stage_6(batch, dry_run)
+        except Exception as exc:
+            print(f"  ⚠  Stage 6 failed for '{bname}': {exc} — skipping")
+            continue
+
+        # Guard: skip Stage 7 if no contacts have an email address
+        contacts_with_email = [
+            c for b in batch for c in b.get("contacts", []) if c.get("email")
+        ]
+        if not contacts_with_email:
+            print(f"  ⏭  '{bname}' — no email addresses found after Stage 6, skipping email generation")
+            continue
+
+        # Stage 7 – Email generation
+        try:
+            email_items = await run_stage_7(batch, dry_run)
+        except Exception as exc:
+            print(f"  ⚠  Stage 7 failed for '{bname}': {exc} — skipping")
+            continue
+
+        # Stage 8 – Store to DB immediately
+        try:
+            await run_stage_8(email_items)
+        except Exception as exc:
+            print(f"  ⚠  Stage 8 failed for '{bname}': {exc}")
+            continue
+
+        all_email_items.extend(email_items)
+        print(f"  ✅  '{bname}' done — {len(email_items)} email(s) stored")
+
+    print(f"\n{'━'*60}")
+    print(f"  ✅  Per-business pipeline complete for '{city}'")
+    print(f"  📊  {len(all_email_items)} total email(s) generated across {total} business(es)")
+    print(f"{'━'*60}\n")
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test HORECA pipeline stages")
@@ -564,5 +711,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip real API calls; use mock data instead",
     )
+    parser.add_argument(
+        "--mode",
+        default="batch",
+        choices=["batch", "per-business"],
+        help=(
+            "batch        (default) — run each stage across all businesses before the next stage.\n"
+            "per-business — extract once (Stage 1), then run Stages 2-8 for each business individually before moving to the next."
+        ),
+    )
     args = parser.parse_args()
-    asyncio.run(run_pipeline(city=args.city, stage=args.stage, dry_run=args.dry_run))
+
+    if args.mode == "per-business":
+        asyncio.run(run_pipeline_per_business(city=args.city, dry_run=args.dry_run))
+    else:
+        asyncio.run(run_pipeline(city=args.city, stage=args.stage, dry_run=args.dry_run))

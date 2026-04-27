@@ -32,7 +32,7 @@ ABOUT DHAMPUR GREEN (weave in naturally — do NOT list mechanically):
 • Switching builds customer loyalty + positions the business as health-forward.
 • Summer Mocktail Syrups (relevant for Cafe/Restaurant/Hotel): Black Currant (salty), Blue Curacao (tangy),
   Jeera Masala Shikanji, Kala Khatta, Lemonade Masala Banta, Grenadine Pomegranate, Mint Mojito.
-• Pricing catalogue: https://www.dhampurgreen.com/collections/all-products
+• Pricing catalogue: https://www.dhampurgreen.com/collections/horeca-b2b
 
 LEAD DETAILS:
 Business      : {business_name}

@@ -62,7 +62,7 @@ AI Insight            : {reasoning or 'N/A'}
 ─────────────────────────────────────────────────────────────────────────────
 EMAIL WRITING GUIDELINES
 ─────────────────────────────────────────────────────────────────────────────
-Length  : 180–220 words. Every sentence must earn its place.
+Length  : 130–180 words. Every sentence must earn its place.
 Tone    : Warm, confident, peer-to-peer — NOT a generic sales blast.
 Subject : Curiosity-driven and specific to their business
           (e.g. "A healthier sweetener for {business_name}'s summer menu?").
@@ -76,7 +76,7 @@ Body    :
   4. If Cafe/Restaurant/Hotel — mention 1-2 relevant mocktail flavours as a
      ready-made premium summer menu opportunity.
   5. Pricing transparency — include this exact line:
-     "Explore our product catalogue & bulk pricing: https://dhampurgreen.com/b2b-pricing"
+     "Explore our product catalogue & bulk pricing: https://www.dhampurgreen.com/collections/horeca-b2b"
 CTA     : One clear, low-friction ask:
           "Just reply YES and we'll courier a free sample kit to your kitchen within 48 hours."
 Sign-off: Arjun Mehta | Regional Sales Manager, Dhampur Green | +91-98765-43210

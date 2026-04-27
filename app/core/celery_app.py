@@ -43,10 +43,12 @@ logger = logging.getLogger(__name__)
 
 # ─── CELERY APP ───────────────────────────────────────────────────────────────
 
+import os as _os
+
 celery_app = Celery(
     "horeca_pipeline",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/1",
+    broker=_os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+    backend=_os.getenv("CELERY_BACKEND_URL", "redis://localhost:6379/1"),
     # Explicitly include this module so beat + worker always discover tasks
     include=["app.core.celery_app"],
 )
