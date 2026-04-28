@@ -92,20 +92,42 @@ async def import_all(folder: Path, staging_url: str):
                 items = json.load(fh)
 
             instances = []
+            # Known datetime-like column names used across models
+            datetime_fields = {
+                "created_at",
+                "updated_at",
+                "generated_at",
+                "sent_at",
+                "last_processed_at",
+                "started_at",
+                "completed_at",
+            }
+
             for it in items:
+                # Prepare a mutable copy and coerce datetimes from ISO strings
+                data = dict(it)
+                for k in list(data.keys()):
+                    v = data[k]
+                    if k in datetime_fields and isinstance(v, str) and v:
+                        try:
+                            data[k] = datetime.fromisoformat(v)
+                        except Exception:
+                            # leave as-is if parsing fails
+                            pass
+
                 # Create instance while preserving provided keys
                 try:
-                    inst = model(**it)
+                    inst = model(**data)
                 except Exception:
                     # Try removing primary key if constructor fails
-                    data = dict(it)
+                    pdata = dict(data)
                     pk = None
                     if hasattr(model, "__table__"):
                         for col in model.__table__.primary_key.columns:
                             pk = col.name
-                    if pk and pk in data:
-                        data.pop(pk)
-                    inst = model(**data)
+                    if pk and pk in pdata:
+                        pdata.pop(pk)
+                    inst = model(**pdata)
 
                 instances.append(inst)
 
