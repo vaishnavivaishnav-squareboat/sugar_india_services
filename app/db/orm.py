@@ -25,8 +25,12 @@ def gen_ulid():
         # Encode ULID bytes explicitly to a 26-char base32 string
         return base32.encode(ULID().bytes)
     except Exception:
-        # Fallback to UUID4 string if ULID generation fails for any reason
-        return gen_uuid()
+        # Fallback to a 26-char base32-encoded value derived from UUID4 bytes
+        try:
+            return base32.encode(uuid.uuid4().bytes)
+        except Exception:
+            # As a last resort, return a truncated UUID without dashes to fit 26 chars
+            return uuid.uuid4().hex[:26]
 
 
 # ─── LEAD ────────────────────────────────────────────────────────────────────
