@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 
 # Ensure sugar_india_services/ is on sys.path so app.* imports resolve
@@ -48,7 +49,14 @@ def run_migrations_offline() -> None:
     script output.
 
     """
+    # Resolve DB URL from alembic config or environment.
     url = config.get_main_option("sqlalchemy.url")
+    if not url or ("${" in url and "}" in url):
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise RuntimeError(
+                "DATABASE_URL environment variable is not set and alembic.ini does not provide a concrete sqlalchemy.url"
+            )
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -67,12 +75,16 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # connectable = engine_from_config(
-    #     config.get_section(config.config_ini_section, {}),
-    #     prefix="sqlalchemy.",
-    #     poolclass=pool.NullPool,
-    # )
-    connectable = create_engine(config.get_main_option("sqlalchemy.url"))
+    # Resolve DB URL from alembic config or environment.
+    url = config.get_main_option("sqlalchemy.url")
+    if not url or ("${" in url and "}" in url):
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise RuntimeError(
+                "DATABASE_URL environment variable is not set and alembic.ini does not provide a concrete sqlalchemy.url"
+            )
+
+    connectable = create_engine(url)
 
     with connectable.connect() as connection:
         context.configure(
