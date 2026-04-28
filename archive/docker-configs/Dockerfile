@@ -1,3 +1,6 @@
+# Archived: sugar_india_services/Dockerfile
+# Original Dockerfile archived before removal
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dhampur Green HORECA — Backend Dockerfile
 # Supports three runtime targets:

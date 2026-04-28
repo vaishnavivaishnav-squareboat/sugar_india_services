@@ -1,3 +1,4 @@
+# Archived: sugar_india_services/.dockerignore
 __pycache__/
 **/__pycache__/
 *.pyc
