@@ -13,6 +13,7 @@ from app.db.session import Base
 
 import uuid
 from ulid import ULID
+from ulid import base32
 
 
 def gen_uuid():
@@ -20,7 +21,12 @@ def gen_uuid():
 
 
 def gen_ulid():
-    return str(ULID())
+    try:
+        # Encode ULID bytes explicitly to a 26-char base32 string
+        return base32.encode(ULID().bytes)
+    except Exception:
+        # Fallback to UUID4 string if ULID generation fails for any reason
+        return gen_uuid()
 
 
 # ─── LEAD ────────────────────────────────────────────────────────────────────
