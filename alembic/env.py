@@ -37,31 +37,53 @@ target_metadata = Base.metadata
 # ... etc.
 
 
-def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
+def get_database_url():
     """
-    # Resolve DB URL from alembic config or environment.
+    Resolve DATABASE_URL and convert asyncpg URL
+    to psycopg2 URL for Alembic migrations.
+
+    FastAPI uses:
+        postgresql+asyncpg://
+
+    Alembic must use:
+        postgresql://
+    """
+
     url = config.get_main_option("sqlalchemy.url")
+
     if not url or ("${" in url and "}" in url):
         url = os.environ.get("DATABASE_URL")
-        if not url:
-            raise RuntimeError(
-                "DATABASE_URL environment variable is not set and alembic.ini does not provide a concrete sqlalchemy.url"
-            )
+
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL is not set in environment and alembic.ini does not provide sqlalchemy.url"
+        )
+
+    # IMPORTANT FIX:
+    # Convert asyncpg URL → sync psycopg2 URL
+    if url.startswith("postgresql+asyncpg://"):
+        url = url.replace(
+            "postgresql+asyncpg://",
+            "postgresql://",
+            1
+        )
+
+    return url
+
+
+def run_migrations_offline() -> None:
+    """
+    Run migrations in offline mode.
+    """
+
+    url = get_database_url()
+
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        compare_type=True,
     )
 
     with context.begin_transaction():
@@ -69,26 +91,22 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
-
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
     """
-    # Resolve DB URL from alembic config or environment.
-    url = config.get_main_option("sqlalchemy.url")
-    if not url or ("${" in url and "}" in url):
-        url = os.environ.get("DATABASE_URL")
-        if not url:
-            raise RuntimeError(
-                "DATABASE_URL environment variable is not set and alembic.ini does not provide a concrete sqlalchemy.url"
-            )
+    Run migrations in online mode.
+    """
 
-    connectable = create_engine(url)
+    url = get_database_url()
+
+    connectable = create_engine(
+        url,
+        poolclass=pool.NullPool,
+    )
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
         )
 
         with context.begin_transaction():
