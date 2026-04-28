@@ -96,8 +96,18 @@ async def get_leads(
             stmt       = stmt.where(sf)
             count_stmt = count_stmt.where(sf)
 
-        # Only show leads that have at least one contact
-        has_contact = select(Contact.lead_id).where(Contact.lead_id == Lead.id).exists()
+        # Only show leads that have at least one contact with an email (email or email_2)
+        has_contact = (
+            select(Contact.lead_id)
+            .where(
+                (Contact.lead_id == Lead.id) &
+                (
+                    (Contact.email.isnot(None) & (Contact.email != "")) |
+                    (Contact.email_2.isnot(None) & (Contact.email_2 != ""))
+                )
+            )
+            .exists()
+        )
         stmt       = stmt.where(has_contact)
         count_stmt = count_stmt.where(has_contact)
 

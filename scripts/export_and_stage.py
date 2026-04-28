@@ -42,21 +42,65 @@ TABLES = [
 ]
 
 
-async def export_all(output_dir: Path):
+async def export_all(output_dir: Path, filtered: bool = False):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     async with AsyncSessionLocal() as session:
-        for model, name in TABLES:
-            stmt = select(model)
-            result = await session.execute(stmt)
-            rows = result.scalars().all()
-            data = [getattr(r, "to_dict")() if hasattr(r, "to_dict") else _row_to_dict(r) for r in rows]
+        if filtered:
+            # Export only leads that have at least one contact with email (email or email_2)
+            lead_stmt = select(Lead).where(
+                select(Contact.lead_id)
+                .where(
+                    (Contact.lead_id == Lead.id)
+                    & (
+                        (Contact.email.isnot(None) & (Contact.email != ""))
+                        | (Contact.email_2.isnot(None) & (Contact.email_2 != ""))
+                    )
+                )
+                .exists()
+            )
+            lead_res = await session.execute(lead_stmt)
+            lead_rows = lead_res.scalars().all()
+            leads_data = [r.to_dict() for r in lead_rows]
 
-            path = output_dir / f"{name}.json"
-            with path.open("w", encoding="utf-8") as fh:
-                json.dump(data, fh, ensure_ascii=False, indent=2)
+            leads_path = output_dir / "leads.json"
+            with leads_path.open("w", encoding="utf-8") as fh:
+                json.dump(leads_data, fh, ensure_ascii=False, indent=2)
+            print(f"Exported {len(leads_data)} leads -> {leads_path}")
 
-            print(f"Exported {len(data)} rows -> {path}")
+            # Export contacts for those leads but only contacts that have email/email_2
+            lead_ids = [r.id for r in lead_rows]
+            if lead_ids:
+                contact_stmt = select(Contact).where(
+                    Contact.lead_id.in_(lead_ids),
+                    (
+                        (Contact.email.isnot(None) & (Contact.email != ""))
+                        | (Contact.email_2.isnot(None) & (Contact.email_2 != ""))
+                    ),
+                )
+                contact_res = await session.execute(contact_stmt)
+                contact_rows = contact_res.scalars().all()
+                contacts_data = [c.to_dict() for c in contact_rows]
+            else:
+                contacts_data = []
+
+            contacts_path = output_dir / "contacts.json"
+            with contacts_path.open("w", encoding="utf-8") as fh:
+                json.dump(contacts_data, fh, ensure_ascii=False, indent=2)
+            print(f"Exported {len(contacts_data)} contacts -> {contacts_path}")
+
+        else:
+            for model, name in TABLES:
+                stmt = select(model)
+                result = await session.execute(stmt)
+                rows = result.scalars().all()
+                data = [getattr(r, "to_dict")() if hasattr(r, "to_dict") else _row_to_dict(r) for r in rows]
+
+                path = output_dir / f"{name}.json"
+                with path.open("w", encoding="utf-8") as fh:
+                    json.dump(data, fh, ensure_ascii=False, indent=2)
+
+                print(f"Exported {len(data)} rows -> {path}")
 
 
 def _row_to_dict(row):
@@ -164,6 +208,7 @@ def _default_exports_dir() -> Path:
 def main():
     parser = argparse.ArgumentParser(description="Export and import tables for staging")
     parser.add_argument("--export", action="store_true", help="Export tables to JSON files")
+    parser.add_argument("--export-filtered", dest="export_filtered", action="store_true", help="Export only leads that have at least one contact with an email and those contacts")
     parser.add_argument("--import", dest="do_import", action="store_true", help="Import JSON files into staging DB")
     parser.add_argument("--folder", type=str, help="Folder containing exported JSON files (for import)")
     parser.add_argument("--staging-url", type=str, help="Staging DATABASE_URL (async driver) e.g. postgresql+asyncpg://user:pass@host/db")
@@ -177,7 +222,7 @@ def main():
     if args.export:
         out = _default_exports_dir()
         print(f"Exporting to {out}")
-        asyncio.run(export_all(out))
+        asyncio.run(export_all(out, filtered=args.export_filtered))
 
     if args.do_import:
         folder = Path(args.folder) if args.folder else Path("exports")
